@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir:*)",
+      "Bash(touch:*)",
+      "Bash(find:*)",
+      "Bash(docker-compose:*)",
+      "Bash(docker-compose build:*)",
+      "Bash(grep:*)"
+    ],
+    "deny": []
+  }
+}

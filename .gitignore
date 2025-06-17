@@ -1,0 +1,119 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.ruff_cache/
+
+# Virtual environments
+bin/
+include/
+lib/
+lib64/
+share/
+pyvenv.cfg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+.DS_Store
+
+# Project specific
+data/
+.env
+*.log
+logs/
+
+# OCR session data
+/tmp/ocr_sessions/
+ocr_sessions/
+*.pdf
+*.png
+*.jpg
+*.jpeg
+
+# Model cache (if stored locally)
+models/
+model_cache/
+.cache/
+
+# Claude specific
+.claude/
+CLAUDE.md.backup
+
+# Docker
+docker-compose.override.yml
+.dockerignore.local
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+debug_startup.py
+
+# OS files
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Test outputs
+test_results/
+pytest_results/
+htmlcov/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+wheels/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Secrets
+*.pem
+*.key
+*.crt
+*.cert
+secrets/
+credentials/
+
+# Uploaded files (if stored locally)
+uploads/
+downloads/
+
+# Monitoring
+grafana-storage/
+prometheus-data/

@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "7799:7799"
+    environment:
+      - PORT=7799
+      - CUDA_VISIBLE_DEVICES=0
+      - MAX_FILE_SIZE=52428800
+      - SESSION_TIMEOUT=3600
+      - LOG_LEVEL=INFO
+      - MODEL_NAME=nanonets/Nanonets-OCR-s
+      - STORAGE_PATH=/tmp/ocr_sessions
+    volumes:
+      # Mount for development - hot reload
+      - ./app:/app/app
+      - ./static:/app/static
+      # Persistent storage for sessions (optional for local dev)
+      - ./data:/tmp/ocr_sessions
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7799/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s

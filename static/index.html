@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gnosis OCR - Document Processing Service</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Gnosis OCR</h1>
+            <p>GPU-Accelerated Document OCR Service</p>
+        </header>
+
+        <main>
+            <!-- Upload Section -->
+            <section id="upload-section" class="upload-section">
+                <div class="upload-area" id="upload-area">
+                    <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="7 10 12 15 17 10"></polyline>
+                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    <h2>Drop PDF file here or click to browse</h2>
+                    <p>Maximum file size: 50MB</p>
+                    <input type="file" id="file-input" accept=".pdf" hidden>
+                    <button class="btn-primary" id="browse-btn">Browse Files</button>
+                </div>
+            </section>
+
+            <!-- Progress Section -->
+            <section id="progress-section" class="progress-section hidden">
+                <h2>Processing Document</h2>
+                <div class="progress-info">
+                    <p id="progress-message">Uploading document...</p>
+                    <p id="progress-details"></p>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progress-fill"></div>
+                </div>
+                <div class="progress-stats">
+                    <span id="progress-percent">0%</span>
+                    <span id="progress-pages"></span>
+                </div>
+            </section>
+
+            <!-- Results Section -->
+            <section id="results-section" class="results-section hidden">
+                <div class="results-header">
+                    <h2>OCR Results</h2>
+                    <div class="results-actions">
+                        <button class="btn-secondary" id="download-markdown">Download Markdown</button>
+                        <button class="btn-secondary" id="download-all">Download All</button>
+                        <button class="btn-primary" id="new-upload">New Upload</button>
+                    </div>
+                </div>
+                
+                <div class="results-tabs">
+                    <button class="tab-btn active" data-tab="text">Extracted Text</button>
+                    <button class="tab-btn" data-tab="images">Page Images</button>
+                    <button class="tab-btn" data-tab="metadata">Metadata</button>
+                </div>
+
+                <div class="results-content">
+                    <!-- Text Content -->
+                    <div id="text-content" class="tab-content active">
+                        <div class="page-navigation">
+                            <select id="page-select"></select>
+                            <button class="btn-icon" id="copy-text" title="Copy to clipboard">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                                </svg>
+                            </button>
+                        </div>
+                        <div id="text-output" class="text-output"></div>
+                    </div>
+
+                    <!-- Images Content -->
+                    <div id="images-content" class="tab-content">
+                        <div class="page-navigation">
+                            <select id="image-page-select"></select>
+                        </div>
+                        <div id="image-output" class="image-output"></div>
+                    </div>
+
+                    <!-- Metadata Content -->
+                    <div id="metadata-content" class="tab-content">
+                        <pre id="metadata-output"></pre>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Error Section -->
+            <div id="error-message" class="error-message hidden">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="8" x2="12" y2="12"></line>
+                    <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                </svg>
+                <p id="error-text"></p>
+                <button class="btn-secondary" id="error-retry">Try Again</button>
+            </div>
+        </main>
+
+        <footer>
+            <p>Powered by Nanonets-OCR-s Model | <a href="/docs" target="_blank">API Documentation</a></p>
+        </footer>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/11.1.1/marked.min.js"></script>
+    <script src="/static/script.js"></script>
+</body>
+</html>
