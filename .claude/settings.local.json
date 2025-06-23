@@ -6,7 +6,11 @@
       "Bash(find:*)",
       "Bash(docker-compose:*)",
       "Bash(docker-compose build:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(chmod:*)",
+      "Bash(ls:*)",
+      "Bash(python:*)",
+      "Bash(./scripts/build-deploy-v2.ps1)"
     ],
     "deny": []
   }

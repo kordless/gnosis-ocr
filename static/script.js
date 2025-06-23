@@ -30,6 +30,9 @@ const errorRetry = document.getElementById('error-retry');
 let currentSession = null;
 let ocrResults = null;
 let statusCheckInterval = null;
+let progressWebSocket = null;
+let uploadPaused = false;
+let currentUploadSession = null;
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
@@ -103,7 +106,7 @@ function handleDrop(e) {
     }
 }
 
-// Upload File
+// Upload File - Smart chunking based on file size
 async function uploadFile(file) {
     // Validate file
     if (file.type !== 'application/pdf') {
@@ -111,19 +114,33 @@ async function uploadFile(file) {
         return;
     }
     
-    if (file.size > 52428800) { // 50MB
-        showError('File size exceeds 50MB limit');
+    if (file.size > 524288000) { // 500MB - leveraging chunked streaming architecture
+        showError('File size exceeds 500MB limit');
         return;
     }
     
     // Show progress section
     showSection('progress');
-    updateProgress(0, 'Uploading document...');
+    updateProgress(0, 'Preparing upload...');
     
+    // Use chunked upload for large files (>10MB) or if user prefers
+    const useChunkedUpload = file.size > 10 * 1024 * 1024; // 10MB threshold
+    
+    if (useChunkedUpload) {
+        await uploadFileChunked(file);
+    } else {
+        await uploadFileNormal(file);
+    }
+}
+
+// Normal upload for small files
+async function uploadFileNormal(file) {
     const formData = new FormData();
     formData.append('file', file);
     
     try {
+        updateProgress(10, 'Uploading document...');
+        
         const response = await fetch('/upload', {
             method: 'POST',
             body: formData
@@ -137,6 +154,14 @@ async function uploadFile(file) {
         const data = await response.json();
         currentSession = data.session_hash;
         
+        logInfo('Upload successful', {
+            session: currentSession,
+            filename: data.filename,
+            file_size: data.file_size
+        });
+        
+        logStatus(currentSession, 'session_created', data);
+        
         // Start status checking
         startStatusChecking();
         
@@ -145,19 +170,237 @@ async function uploadFile(file) {
     }
 }
 
-// Status Checking
+// Chunked upload for large files
+async function uploadFileChunked(file) {
+    const CHUNK_SIZE = 1024 * 1024; // 1MB chunks
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    
+    try {
+        updateProgress(0, `Preparing chunked upload (${totalChunks} chunks)...`);
+        
+        // Start upload session
+        const startResponse = await fetch('/upload/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                filename: file.name,
+                total_size: file.size,
+                total_chunks: totalChunks
+            })
+        });
+        
+        if (!startResponse.ok) {
+            const error = await startResponse.json();
+            throw new Error(error.message || 'Failed to start upload');
+        }
+        
+        const sessionData = await startResponse.json();
+        currentSession = sessionData.session_hash;
+        currentUploadSession = sessionData;
+        
+        // Setup WebSocket for real-time progress
+        setupProgressWebSocket(currentSession);
+        
+        logInfo('Chunked upload started', {
+            session: currentSession,
+            filename: file.name,
+            file_size: file.size,
+            total_chunks: totalChunks
+        });
+        
+        // Upload chunks
+        for (let chunkNumber = 0; chunkNumber < totalChunks; chunkNumber++) {
+            if (uploadPaused) {
+                // Wait for resume
+                await waitForResume();
+            }
+            
+            const start = chunkNumber * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, file.size);
+            const chunk = file.slice(start, end);
+            
+            await uploadChunk(currentSession, chunkNumber, chunk);
+            
+            // Update progress (WebSocket will also update, but this ensures UI responsiveness)
+            const progress = ((chunkNumber + 1) / totalChunks) * 100;
+            updateProgress(progress, `Uploading chunk ${chunkNumber + 1} of ${totalChunks}...`);
+        }
+        
+        logInfo('All chunks uploaded', { session: currentSession });
+        updateProgress(100, 'Upload complete, processing...');
+        
+        // WebSocket will handle the transition to processing status
+        
+    } catch (error) {
+        logError('Chunked upload failed', { session: currentSession, error: error.message });
+        showError(error.message);
+    }
+}
+
+// Upload single chunk
+async function uploadChunk(sessionHash, chunkNumber, chunk) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        
+        reader.onload = async function(e) {
+            try {
+                const arrayBuffer = e.target.result;
+                // Convert to base64 safely for large chunks
+                const uint8Array = new Uint8Array(arrayBuffer);
+                let binaryString = '';
+                for (let i = 0; i < uint8Array.length; i++) {
+                    binaryString += String.fromCharCode(uint8Array[i]);
+                }
+                const base64 = btoa(binaryString);
+                
+                const response = await fetch(`/upload/chunk/${sessionHash}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        chunk_number: chunkNumber,
+                        content: base64
+                    })
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.message || `Failed to upload chunk ${chunkNumber}`);
+                }
+                
+                const result = await response.json();
+                resolve(result);
+                
+            } catch (error) {
+                reject(error);
+            }
+        };
+        
+        reader.onerror = () => reject(new Error('Failed to read chunk'));
+        reader.readAsArrayBuffer(chunk);
+    });
+}
+
+// Setup WebSocket for real-time progress updates
+function setupProgressWebSocket(sessionId) {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/progress/${sessionId}`;
+    
+    progressWebSocket = new WebSocket(wsUrl);
+    
+    progressWebSocket.onopen = function() {
+        logInfo('WebSocket connected', { session: sessionId });
+    };
+    
+    progressWebSocket.onmessage = function(event) {
+        const data = JSON.parse(event.data);
+        handleProgressUpdate(data);
+    };
+    
+    progressWebSocket.onerror = function(error) {
+        logError('WebSocket error', { session: sessionId, error: error.message });
+    };
+    
+    progressWebSocket.onclose = function() {
+        logInfo('WebSocket disconnected', { session: sessionId });
+        progressWebSocket = null;
+    };
+}
+
+// Handle progress updates from WebSocket
+function handleProgressUpdate(data) {
+    switch (data.type) {
+        case 'upload_progress':
+            updateProgress(
+                data.progress_percent,
+                data.message,
+                null,
+                null,
+                `${data.received_chunks}/${data.total_chunks} chunks`
+            );
+            break;
+            
+        case 'upload_complete':
+            updateProgress(100, data.message);
+            break;
+            
+        case 'processing_started':
+            updateProgress(0, data.message);
+            // Switch to regular status checking for OCR progress
+            startStatusChecking();
+            break;
+            
+        case 'error':
+            showError(data.message);
+            break;
+            
+        default:
+            logDebug('Unknown progress update', data);
+    }
+}
+
+// Wait for upload resume (placeholder for pause/resume functionality)
+async function waitForResume() {
+    return new Promise(resolve => {
+        const checkInterval = setInterval(() => {
+            if (!uploadPaused) {
+                clearInterval(checkInterval);
+                resolve();
+            }
+        }, 100);
+    });
+}
+
+// Status Checking with retry logic
+let statusCheckFailureCount = 0;
+const MAX_STATUS_FAILURES = 5; // Allow 5 consecutive failures before giving up
+
 function startStatusChecking() {
+    // Clear any existing interval first
+    if (statusCheckInterval) {
+        clearInterval(statusCheckInterval);
+    }
+    // Reset failure count
+    statusCheckFailureCount = 0;
     statusCheckInterval = setInterval(checkStatus, 1000);
 }
 
 async function checkStatus() {
-    if (!currentSession) return;
+    if (!currentSession) {
+        logDebug('checkStatus called but no currentSession');
+        return;
+    }
+    
+    logDebug('Checking status', { session: currentSession });
     
     try {
-        const response = await fetch(`/status/${currentSession}`);
-        if (!response.ok) throw new Error('Status check failed');
+        const response = await fetch(`/status/${currentSession}`, {
+            timeout: 10000 // 10 second timeout
+        });
+        
+        logStatus(currentSession, 'status_check', {
+            status: response.status,
+            ok: response.ok,
+            url: response.url
+        });
+        
+        if (!response.ok) {
+            const errorText = await response.text();
+            logError('Status check failed', {
+                session: currentSession,
+                status: response.status,
+                statusText: response.statusText,
+                error: errorText,
+                failure_count: statusCheckFailureCount + 1
+            });
+            throw new Error(`Status check failed: ${response.status} ${response.statusText}`);
+        }
         
         const status = await response.json();
+        
+        // Reset failure count on successful response
+        statusCheckFailureCount = 0;
+        
+        logStatus(currentSession, 'status_received', status);
         
         // Update progress
         updateProgress(
@@ -169,17 +412,39 @@ async function checkStatus() {
         
         // Check if completed
         if (status.status === 'completed') {
+            logInfo('Processing completed', { session: currentSession });
             clearInterval(statusCheckInterval);
             await loadResults();
         } else if (status.status === 'failed') {
+            logError('Processing failed', { session: currentSession, message: status.message });
             clearInterval(statusCheckInterval);
             showError(status.message || 'Processing failed');
         }
+
         
     } catch (error) {
-        clearInterval(statusCheckInterval);
-        showError(error.message);
+        statusCheckFailureCount++;
+        
+        logError('Status check error', {
+            session: currentSession,
+            error: error.message,
+            failure_count: statusCheckFailureCount,
+            max_failures: MAX_STATUS_FAILURES
+        });
+        
+        // Only show error and stop if we've exceeded max failures
+        if (statusCheckFailureCount >= MAX_STATUS_FAILURES) {
+            clearInterval(statusCheckInterval);
+            showError(`Connection lost after ${MAX_STATUS_FAILURES} attempts. Please try refreshing the page.`);
+        } else {
+            // Just log the error but continue checking
+            logInfo(`Status check failed (${statusCheckFailureCount}/${MAX_STATUS_FAILURES}), retrying...`, {
+                session: currentSession,
+                error: error.message
+            });
+        }
     }
+
 }
 
 // Load Results
@@ -237,7 +502,13 @@ function displayPage(pageNumber) {
 }
 
 function displayImage(pageNumber) {
-    imageOutput.innerHTML = `<img src="/images/${currentSession}/${pageNumber}" alt="Page ${pageNumber}">`;
+    // Use the actual image_url from the API response instead of hardcoded /images/ path
+    const page = ocrResults?.pages?.find(p => p.page_number === pageNumber);
+    if (page && page.image_url) {
+        imageOutput.innerHTML = `<img src="${page.image_url}" alt="Page ${pageNumber}">`;
+    } else {
+        imageOutput.innerHTML = `<p>Image not available for page ${pageNumber}</p>`;
+    }
 }
 
 function displayMetadata() {
@@ -311,13 +582,16 @@ async function copyTextToClipboard() {
 }
 
 // Progress Updates
-function updateProgress(percent, message, currentPage = null, totalPages = null) {
+function updateProgress(percent, message, currentPage = null, totalPages = null, chunkInfo = null) {
     progressFill.style.width = `${percent}%`;
     progressPercent.textContent = `${Math.round(percent)}%`;
     progressMessage.textContent = message;
     
     if (currentPage && totalPages) {
         progressPages.textContent = `Page ${currentPage} of ${totalPages}`;
+        progressDetails.textContent = '';
+    } else if (chunkInfo) {
+        progressPages.textContent = chunkInfo;
         progressDetails.textContent = '';
     } else {
         progressPages.textContent = '';
@@ -363,8 +637,17 @@ function resetToUpload() {
     // Clear state
     currentSession = null;
     ocrResults = null;
+    currentUploadSession = null;
+    uploadPaused = false;
+    statusCheckFailureCount = 0; // Reset failure count
+    
     if (statusCheckInterval) {
         clearInterval(statusCheckInterval);
+    }
+    
+    if (progressWebSocket) {
+        progressWebSocket.close();
+        progressWebSocket = null;
     }
     
     // Reset file input
@@ -372,4 +655,21 @@ function resetToUpload() {
     
     // Show upload section
     showSection('upload');
+}
+
+// Logging Functions (placeholders - replace with actual logging implementation)
+function logInfo(message, context = {}) {
+    console.log('[INFO]', message, context);
+}
+
+function logError(message, context = {}) {
+    console.error('[ERROR]', message, context);
+}
+
+function logDebug(message, context = {}) {
+    console.debug('[DEBUG]', message, context);
+}
+
+function logStatus(session, event, data = {}) {
+    console.log('[STATUS]', session, event, data);
 }

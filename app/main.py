@@ -41,6 +41,10 @@ structlog.configure(
 
 logger = structlog.get_logger()
 
+# FORCE LOG AT MODULE LEVEL
+print("HARIN FORCE LOG: main.py (OLD) module loaded")
+logger.error("HARIN FORCE LOG: OLD main.py structlog configured")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -185,9 +189,14 @@ async def process_document_task(session_hash: str, file_path: str):
 @app.get("/status/{session_hash}", response_model=SessionStatus)
 async def get_status(session_hash: str):
     """Get processing status for a session"""
+    print(f"HARIN STATUS ENDPOINT HIT: {session_hash}")
+    logger.error("HARIN STATUS ENDPOINT FORCE LOG", session_hash=session_hash)
+    
     status = storage_service.get_session_status(session_hash)
     
     if not status:
+        print(f"HARIN SESSION NOT FOUND: {session_hash}")
+        logger.error("HARIN SESSION NOT FOUND", session_hash=session_hash)
         raise HTTPException(status_code=404, detail="Session not found")
         
     return SessionStatus(

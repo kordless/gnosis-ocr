@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     port: int = Field(default=7799, env="PORT")
     
     # OCR Settings
-    max_file_size: int = Field(default=52428800, env="MAX_FILE_SIZE")  # 50MB
+    max_file_size: int = Field(default=524288000, env="MAX_FILE_SIZE")  # 500MB with chunked streaming
     session_timeout: int = Field(default=3600, env="SESSION_TIMEOUT")  # 1 hour
     max_pages: int = Field(default=500, env="MAX_PAGES")
     allowed_extensions: set[str] = {".pdf"}

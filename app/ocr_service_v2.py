@@ -1,4 +1,4 @@
-"""OCR processing service using Nanonets-OCR-s model"""
+"""OCR processing service using Nanonets-OCR-s model with new storage architecture"""
 import os
 import gc
 import json
@@ -16,29 +16,30 @@ import structlog
 from io import BytesIO
 
 # DEBUG MODE: Set to True to skip inference and just extract/save images
-DEBUG_SKIP_INFERENCE = True
+DEBUG_SKIP_INFERENCE = False
 
-from app.config import settings, get_session_file_path
+from app.config import settings
 from app.models import ProcessingStatus
-from app.storage_service import storage_service
+from app.storage_service_v2 import StorageService
 
 logger = structlog.get_logger()
 
 
 class OCRService:
-    """Handles OCR processing using the Nanonets model"""
+    """Handles OCR processing using the Nanonets model with new storage architecture"""
     
-    def __init__(self):
+    def __init__(self, storage_service: Optional[StorageService] = None):
         self.model = None
         self.tokenizer = None
         self.processor = None
         self.device = None
         self.model_loaded = False
+        self.storage_service = storage_service
         
     async def initialize(self):
         """Initialize the OCR model"""
         try:
-            logger.info("Initializing OCR model", model=settings.model_name)
+            logger.info("🚀 HARIN DEBUG: Starting OCR initialization with cache bypass fix", model=settings.model_name)
             
             # Check GPU availability
             if torch.cuda.is_available() and settings.device == "cuda":
@@ -48,33 +49,100 @@ class OCRService:
             else:
                 self.device = torch.device("cpu")
                 logger.warning("GPU not available, using CPU")
-                
-            # Load model and processor (following reference implementation)
-            logger.info("Loading tokenizer and processor")
             
-            # FORCE LOCAL CACHE USAGE - No hub downloads
+            # Get cache configuration from storage service if available
             cache_kwargs = {
-                "local_files_only": True,  # Critical: Force local cache usage
-                "trust_remote_code": True
+                "local_files_only": os.environ.get("HF_DATASETS_OFFLINE", "1") == "1" or os.environ.get("TRANSFORMERS_OFFLINE", "1") == "1",
+                "trust_remote_code": True,
+                "cache_dir": os.environ.get("HF_HOME", os.environ.get("TRANSFORMERS_CACHE", "/cache/huggingface"))
             }
             
+            logger.info(f"🔧 CACHE KWARGS: {cache_kwargs}")
+            
+            if self.storage_service:
+                # Use storage service cache configuration
+                cache_config = self.storage_service.get_cache_config()
+                cache_kwargs.update(cache_config)
+                
+                # CLOUD RUN FIX: List cache directory and bypass verification
+                cache_dir = cache_config.get('cache_dir')
+                logger.info(f"🔍 CACHE DEBUG: Checking cache directory", cache_dir=cache_dir)
+                
+                try:
+                    if os.path.exists(cache_dir):
+                        contents = os.listdir(cache_dir)
+                        logger.info(f"📁 CACHE CONTENTS: {contents[:10]}")  # First 10 items
+                        hub_path = os.path.join(cache_dir, 'hub')
+                        if os.path.exists(hub_path):
+                            hub_contents = os.listdir(hub_path)
+                            logger.info(f"🏢 HUB CONTENTS: {hub_contents[:10]}")
+                    else:
+                        logger.error(f"❌ CACHE DIR MISSING: {cache_dir}")
+                except Exception as e:
+                    logger.error(f"💥 CACHE CHECK FAILED: {e}")
+                
+                # Force proceed anyway - let HF handle cache
+                logger.info("🚀 BYPASSING cache verification - Cloud Run mode")
+                
+                logger.info("Using storage service cache", cache_dir=cache_config.get('cache_dir'))
+            
             logger.info("Loading tokenizer and processor from LOCAL CACHE ONLY", 
-                       model=settings.model_name)
+                       model=settings.model_name, cache_kwargs=cache_kwargs)
+            
+            # For Cloud Run, we need to be very explicit about offline mode
+            if os.environ.get("RUNNING_IN_CLOUD") == "true":
+                # Force offline mode
+                os.environ["HF_DATASETS_OFFLINE"] = "1"
+                os.environ["TRANSFORMERS_OFFLINE"] = "1"
+                os.environ["HF_HUB_OFFLINE"] = "1"
+                
+                # CRITICAL: Prevent HuggingFace from trying to download and corrupting cache
+                os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+                os.environ["HF_HUB_DISABLE_DOWNLOAD_PROGRESS"] = "1"
+                
+                # Remove any .no_exist files that block cache usage
+                cache_dir = cache_kwargs.get('cache_dir', '/cache/huggingface')
+                model_dir = os.path.join(cache_dir, 'hub', f'models--{settings.model_name.replace("/", "--")}')
+                no_exist_file = os.path.join(model_dir, '.no_exist')
+                if os.path.exists(no_exist_file):
+                    logger.warning(f"Found .no_exist blocker file, removing: {no_exist_file}")
+                    try:
+                        os.remove(no_exist_file)
+                    except Exception as e:
+                        logger.error(f"Failed to remove .no_exist: {e}")
+                
             # Load tokenizer and processor (these are lightweight)
-            self.tokenizer = AutoTokenizer.from_pretrained(settings.model_name, **cache_kwargs)
-            self.processor = AutoProcessor.from_pretrained(settings.model_name, **cache_kwargs)
+            try:
+                self.tokenizer = AutoTokenizer.from_pretrained(settings.model_name, **cache_kwargs)
+                logger.info("✅ Tokenizer loaded successfully")
+            except Exception as e:
+                logger.error(f"❌ Tokenizer loading failed: {e}")
+                raise
+                
+            try:
+                self.processor = AutoProcessor.from_pretrained(settings.model_name, **cache_kwargs)
+                logger.info("✅ Processor loaded successfully")
+            except Exception as e:
+                logger.error(f"❌ Processor loading failed: {e}")
+                raise
             
             logger.info("Loading model weights - this may take a moment")
             
             # Load model with proper configuration
             model_kwargs = {
-                # CRITICAL: Force local cache usage only - NO HUB DOWNLOADS
-                "local_files_only": True,
+                # CLOUD RUN FIX: Override for production
+                "local_files_only": os.environ.get("HF_LOCAL_FILES_ONLY", "True").lower() == "true",
                 "trust_remote_code": True,
                 # Memory optimization settings
                 "low_cpu_mem_usage": True,
                 "device_map": "auto"
             }
+            
+            logger.info(f"🔧 MODEL KWARGS: {model_kwargs}")
+            
+            # Add cache directory if available
+            if self.storage_service:
+                model_kwargs.update(self.storage_service.get_cache_config())
             
             # Set dtype based on device
             if self.device.type == "cuda":
@@ -90,7 +158,6 @@ class OCRService:
             
             logger.info("Loading model with LOCAL CACHE ONLY settings", 
                        local_files_only=True, device=self.device.type)
-
             
             self.model = AutoModelForImageTextToText.from_pretrained(
                 settings.model_name,
@@ -124,12 +191,16 @@ class OCRService:
             }
         return {'available': False}
         
-    async def process_document(self, session_hash: str, file_path: str) -> Dict[str, Any]:
-        """Process a PDF document"""
+    async def process_document(self, session_hash: str, file_content: bytes, 
+                             storage_service: StorageService) -> Dict[str, Any]:
+        """Process a PDF document using the new storage architecture"""
         try:
-            # Update status to processing
-            storage_service.update_session_status(
-                session_hash, 
+            # Update storage service for this session
+            self.storage_service = storage_service
+            
+            # Save status as processing
+            await self._update_status(
+                session_hash,
                 ProcessingStatus.PROCESSING,
                 progress=0.0,
                 message="Starting document processing"
@@ -137,17 +208,22 @@ class OCRService:
             
             # Phase 1: Extract all pages from PDF first (this is fast)
             logger.info("Starting PDF extraction - model NOT loaded yet", session_hash=session_hash)
-            storage_service.update_session_status(
-                session_hash, 
+            await self._update_status(
+                session_hash,
                 ProcessingStatus.PROCESSING,
                 progress=0.0,
                 message="Extracting pages from PDF"
             )
             
             # Extract pages WITHOUT loading any ML models
-            pages = await self._extract_pdf_pages(file_path)
+            pages = await self._extract_pdf_pages_from_bytes(file_content)
             total_pages = len(pages)
-            storage_service.update_session_metadata(session_hash, {'total_pages': total_pages})
+            
+            # Update metadata
+            await storage_service.save_session_metadata(session_hash, {
+                'total_pages': total_pages,
+                'extraction_complete': True
+            })
             
             # Save all page images first
             logger.info("Saving extracted page images", session_hash=session_hash, total_pages=total_pages)
@@ -155,7 +231,7 @@ class OCRService:
                 page_num = idx + 1
                 progress = (idx / total_pages) * 20  # 20% for extraction
                 
-                storage_service.update_session_status(
+                await self._update_status(
                     session_hash,
                     ProcessingStatus.PROCESSING,
                     progress=progress,
@@ -175,7 +251,7 @@ class OCRService:
             # Phase 2: Initialize model if needed (AFTER all extraction is done)
             if not self.is_ready():
                 logger.info("Model not loaded, initializing now...", session_hash=session_hash)
-                storage_service.update_session_status(
+                await self._update_status(
                     session_hash,
                     ProcessingStatus.PROCESSING,
                     progress=20.0,
@@ -194,7 +270,7 @@ class OCRService:
                 progress = 20 + ((idx / total_pages) * 80)  # 80% for OCR
                 
                 # Update progress
-                storage_service.update_session_status(
+                await self._update_status(
                     session_hash,
                     ProcessingStatus.PROCESSING,
                     progress=progress,
@@ -230,25 +306,22 @@ class OCRService:
             combined_markdown = "\n\n---\n\n".join(combined_text)
             await storage_service.save_combined_result(session_hash, combined_markdown)
             
-            # Save metadata
+            # Save final metadata
             metadata = {
                 'model': settings.model_name,
                 'device': self.device.type,
                 'total_pages': total_pages,
-                'processed_at': datetime.utcnow().isoformat()
+                'processed_at': datetime.utcnow().isoformat(),
+                'status': 'completed'
             }
             
             if self.device.type == "cuda":
                 metadata['gpu_name'] = torch.cuda.get_device_name(0)
                 
-            metadata_path = get_session_file_path(
-                session_hash, 'metadata.json', 'output'
-            )
-            with open(metadata_path, 'w') as f:
-                json.dump(metadata, f, indent=2)
+            await storage_service.save_session_metadata(session_hash, metadata)
                 
             # Update status to completed
-            storage_service.update_session_status(
+            await self._update_status(
                 session_hash,
                 ProcessingStatus.COMPLETED,
                 progress=100.0,
@@ -270,12 +343,31 @@ class OCRService:
                         session_hash=session_hash, 
                         error=str(e))
             
-            storage_service.update_session_status(
+            await self._update_status(
                 session_hash,
                 ProcessingStatus.FAILED,
                 message=f"Processing failed: {str(e)}"
             )
             raise
+    
+    async def _update_status(self, session_hash: str, status: ProcessingStatus, 
+                           progress: float = 0.0, message: str = "", 
+                           current_page: Optional[int] = None):
+        """Update session status using new storage service"""
+        status_data = {
+            'status': status.value,
+            'progress': progress,
+            'message': message,
+            'updated_at': datetime.utcnow().isoformat()
+        }
+        if current_page is not None:
+            status_data['current_page'] = current_page
+            
+        await self.storage_service.save_file(
+            json.dumps(status_data, indent=2),
+            'status.json',
+            session_hash
+        )
             
     async def _create_debug_results(self, session_hash: str, pages: List) -> Dict[str, Any]:
         """Create mock results for debug mode (no inference)"""
@@ -292,7 +384,7 @@ class OCRService:
                 logger.info(f"🔧 DEBUG: Mock processing page {page_num}/{total_pages}", session_hash=session_hash)
                 
                 # Update progress
-                storage_service.update_session_status(
+                await self._update_status(
                     session_hash,
                     ProcessingStatus.PROCESSING,
                     progress=progress,
@@ -304,7 +396,7 @@ class OCRService:
                 mock_text = f"[DEBUG MODE] This is mock OCR text for page {page_num}.\n\nImage size: {page_image.size}\nImage mode: {page_image.mode}\n\nInference was skipped to debug image extraction and status endpoints."
                 
                 # Save page result
-                await storage_service.save_page_result(session_hash, page_num, mock_text)
+                await self.storage_service.save_page_result(session_hash, page_num, mock_text)
                 
                 results.append({
                     'page_number': page_num,
@@ -314,10 +406,10 @@ class OCRService:
             
             # Save combined result
             combined_markdown = "\n\n---\n\n".join(combined_text)
-            await storage_service.save_combined_result(session_hash, combined_markdown)
+            await self.storage_service.save_combined_result(session_hash, combined_markdown)
             
             # Update status to completed
-            storage_service.update_session_status(
+            await self._update_status(
                 session_hash,
                 ProcessingStatus.COMPLETED,
                 progress=100.0,
@@ -334,19 +426,19 @@ class OCRService:
             
         except Exception as e:
             logger.error("💥 Error in debug mode processing", session_hash=session_hash, error=str(e))
-            storage_service.update_session_status(
+            await self._update_status(
                 session_hash,
                 ProcessingStatus.FAILED,
                 message=f"DEBUG processing failed: {str(e)}"
             )
             raise
-            
-    async def _extract_pdf_pages(self, pdf_path: str) -> List[Image.Image]:
-        """Extract pages from PDF as PIL images"""
+    
+    async def _extract_pdf_pages_from_bytes(self, pdf_content: bytes) -> List[Image.Image]:
+        """Extract pages from PDF bytes as PIL images"""
         pages = []
         
-        # Open PDF
-        pdf_document = fitz.open(pdf_path)
+        # Open PDF from bytes
+        pdf_document = fitz.open(stream=pdf_content, filetype="pdf")
         
         try:
             for page_num in range(min(len(pdf_document), settings.max_pages)):

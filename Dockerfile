@@ -73,8 +73,9 @@ RUN chown -R appuser:appuser /app && \
 RUN mkdir -p /tmp/ocr_sessions && \
     chown -R appuser:appuser /tmp/ocr_sessions
 
-# Switch to non-root user
-USER appuser
+# Keep as root user for cache access (Windows mount permissions)
+# USER appuser
+
 
 # Environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -94,4 +95,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health || exit 1
 
 # Run the application
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7799"]
+CMD ["python", "-m", "uvicorn", "app.main_v2:app", "--host", "0.0.0.0", "--port", "7799"]

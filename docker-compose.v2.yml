@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "7799:7799"
+    environment:
+      # Core settings
+      - PORT=7799
+      - CUDA_VISIBLE_DEVICES=0
+      - MAX_FILE_SIZE=52428800
+      - SESSION_TIMEOUT=3600
+      - LOG_LEVEL=INFO
+      - MODEL_NAME=nanonets/Nanonets-OCR-s
+      
+      # Storage architecture settings
+      - STORAGE_PATH=/app/storage
+      - RUNNING_IN_CLOUD=false
+      - GCS_BUCKET_NAME=gnosis-ocr-storage
+      - MODEL_BUCKET_NAME=gnosis-ocr-models
+      
+      # Cache settings
+      - HF_CACHE_HOST_PATH=/app/storage/cache/huggingface
+      - MODEL_CACHE_PATH=/app/storage/cache/huggingface
+      
+      # Enable local files only mode for offline operation
+      - HF_DATASETS_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      
+    volumes:
+      # Mount for development - hot reload
+      - ./app:/app/app
+      - ./static:/app/static
+      
+      # Unified storage directory structure
+      - ./storage:/app/storage
+      
+      # Option 1: Use existing HF cache (recommended for development)
+      - ${HF_CACHE_HOST_PATH:-C:\Users\kord\.cache\huggingface}:/root/.cache/huggingface
+      
+      # Option 2: Use storage-based cache (uncomment to use)
+      # - ./storage/cache/huggingface:/root/.cache/huggingface
+      
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7799/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+      
+  # Optional: Storage initialization service
+  storage-init:
+    image: busybox
+    command: |
+      sh -c "
+        mkdir -p /storage/users
+        mkdir -p /storage/logs
+        mkdir -p /storage/cache/huggingface
+        echo 'Storage directories initialized'
+      "
+    volumes:
+      - ./storage:/storage
+    profiles:
+      - init

@@ -21,6 +21,15 @@ services:
       - ./static:/app/static
       # Persistent storage for sessions (optional for local dev)
       - ./data:/tmp/ocr_sessions
+      # Mount Hugging Face cache to avoid re-downloading models (7.4GB)
+      # This now includes both cache structures and all model commits
+      - ${HF_CACHE_HOST_PATH:-C:\Users\kord\.cache\huggingface}:/root/.cache/huggingface
+
+
+
+
+
+
     deploy:
       resources:
         reservations:
