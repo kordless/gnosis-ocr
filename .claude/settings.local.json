@@ -10,7 +10,23 @@
       "Bash(chmod:*)",
       "Bash(ls:*)",
       "Bash(python:*)",
-      "Bash(./scripts/build-deploy-v2.ps1)"
+      "Bash(./scripts/build-deploy-v2.ps1)",
+      "Bash(gcloud logging read:*)",
+      "Bash(rm:*)",
+      "Bash(gcloud config:*)",
+      "Bash(docker logs:*)",
+      "Bash(mv:*)",
+      "Bash(docker exec:*)",
+      "Bash(curl:*)",
+      "mcp__gnosis-docker__docker_logs",
+      "mcp__gnosis-docker__docker_ps",
+      "Bash(timeout 15 docker-compose logs -f --tail=5)",
+      "mcp__gnosis-conciousness__list_saved_characters",
+      "mcp__gnosis-conciousness__load_and_embody_character",
+      "mcp__gnosis-docker__docker_restart",
+      "mcp__gnosis-docker__docker_images",
+      "mcp__gnosis-conciousness__save_character_memory",
+      "mcp__gnosis-conciousness__character_generator"
     ],
     "deny": []
   }

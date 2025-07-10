@@ -1,356 +1,239 @@
-# Gnosis OCR - Production-Ready Cloud OCR Service
+# 🔍 Gnosis OCR
 
-A high-performance, GPU-accelerated OCR service using the Nanonets-OCR-s model with intelligent caching, chunked streaming uploads, and enterprise-grade scalability.
+<div align="center">
 
-## 🚀 Key Features
+**Enterprise-Grade GPU-Accelerated OCR Service**
 
-### Core OCR Capabilities
-- 🎯 **GPU-Accelerated Processing** - NVIDIA L4 GPU with CUDA acceleration
-- 🧠 **Advanced AI Model** - Nanonets-OCR-s with LaTeX equation support
-- 📄 **PDF to Markdown** - High-quality text extraction with formatting
-- 🖼️ **Page Image Extraction** - Individual page images at 300 DPI
-- 📊 **Real-time Progress** - WebSocket-based live processing updates
+*Extract text from documents with state-of-the-art AI models*
 
-### Enterprise File Handling
-- 📦 **Massive File Support** - Up to 500MB PDFs via chunked streaming
-- ⚡ **Smart Upload Strategy** - Auto-selects chunked vs direct upload
-- 🔄 **Resilient Processing** - Network-tolerant with retry logic
-- 🛡️ **Session Isolation** - Secure user data partitioning
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Docker](https://img.shields.io/badge/Docker-Ready-blue?logo=docker)](https://www.docker.com/)
+[![GPU Accelerated](https://img.shields.io/badge/GPU-Accelerated-green?logo=nvidia)](https://developer.nvidia.com/cuda-zone)
+[![Cloud Run](https://img.shields.io/badge/Google%20Cloud-Run-4285F4?logo=google-cloud)](https://cloud.google.com/run)
 
-### Cloud-Native Architecture
-- ☁️ **Google Cloud Run** - Serverless deployment with auto-scaling
-- 💾 **GCS FUSE Integration** - Persistent model caching
-- 🧠 **Intelligent Caching** - Downloads models once, uses cache forever
-- 🔧 **Zero-Config Deployment** - Automated infrastructure setup
+[Quick Start](#-quick-start) • [Features](#-features) • [Documentation](#-documentation) • [Deployment](#-deployment) • [API](#-api-reference)
 
-## 📊 Performance Specs
+</div>
 
-| Feature | Specification |
-|---------|---------------|
-| **Max File Size** | 500MB (chunked streaming) |
-| **Chunk Size** | 1MB (optimal for Cloud Run) |
-| **GPU Memory** | 16GB allocated, 5GB model limit |
-| **Processing Speed** | ~30 seconds per page (GPU) |
-| **Concurrent Users** | 10 (configurable) |
-| **Cache Strategy** | Persistent GCS FUSE mount |
+## ✨ Features
 
-## 🏗️ Architecture Overview
+- 🚀 **GPU-Accelerated Processing** - Powered by NVIDIA CUDA for blazing-fast OCR
+- 🎯 **State-of-the-Art Models** - Uses Nanonets OCR-s for superior accuracy
+- 📄 **Large File Support** - Process up to 500MB PDFs with HTTP/2 streaming (uploads work during model loading)
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    GNOSIS OCR SERVICE                       │
-├─────────────────────────────────────────────────────────────┤
-│  Frontend (Static)     │  Backend (FastAPI)                │
-│  ├─ Chunked Upload     │  ├─ Session Management            │
-│  ├─ WebSocket Progress │  ├─ OCR Processing                │
-│  ├─ Real-time UI      │  ├─ Storage Service               │
-│  └─ Error Handling    │  └─ Progress Broadcasting         │
-├─────────────────────────────────────────────────────────────┤
-│                    STORAGE LAYER                            │
-│  ┌─ GCS Bucket (Models) ─┐  ┌─ GCS Bucket (User Data) ─┐    │
-│  │ /cache/huggingface/   │  │ /users/{hash}/{session}/ │    │
-│  │ └─ Nanonets-OCR-s     │  │ ├─ upload.pdf            │    │
-│  │   ├─ pytorch_model.bin│  │ ├─ page_001.png          │    │
-│  │   └─ config.json     │  │ └─ combined_output.md    │    │
-│  └───────────────────────┘  └─────────────────────────────┘    │
-├─────────────────────────────────────────────────────────────┤
-│                 CLOUD RUN DEPLOYMENT                        │
-│  ├─ NVIDIA L4 GPU + 16GB RAM                               │
-│  ├─ GCS FUSE Mount (model cache)                           │
-│  ├─ Auto-scaling (0-3 instances)                           │
-│  └─ Load Balancer + CDN                                    │
-└─────────────────────────────────────────────────────────────┘
-```
+- ☁️ **Cloud Native** - Deploy to Google Cloud Run with auto-scaling
+- 🔒 **Enterprise Security** - User isolation, session management, and audit trails
+- 📊 **Real-Time Progress** - Live processing updates and detailed analytics
+- 🌐 **Modern Web UI** - Beautiful, responsive interface with dark mode
+- 🔌 **REST API** - Full programmatic access with OpenAPI docs
 
-## 🛠️ Project Structure
-
-```
-gnosis-ocr/
-├── README.md                           # This file
-├── DEPLOYMENT_GUIDE.md                 # Cloud Run deployment
-├── API_DOCUMENTATION.md                # Complete API reference
-├── HUGGINGFACE_ONLINE.md              # HF caching strategy
-├── HUGGING_FACE_NOTES.md              # Technical analysis
-├── Dockerfile.lean                     # Production build
-├── docker-compose.v2.yml              # V2 development
-├── scripts/
-│   ├── build-deploy-v2.ps1            # Complete deployment
-│   └── deploy-v2-clean.ps1            # Quick deploy
-├── app/
-│   ├── main_v2.py                     # FastAPI V2 app
-│   ├── ocr_service_v2_fixed.py        # OCR processing
-│   ├── storage_service_v2.py          # Cloud storage
-│   ├── models.py                      # Data models
-│   └── config.py                      # Configuration
-├── static/
-│   ├── index.html                     # Upload interface
-│   ├── style.css                      # Modern UI
-│   └── script.js                      # Chunked upload
-└── tests/
-    ├── test_api.py                    # API testing
-    └── test_cache_fix.py              # Cache validation
-```
 
 ## 🚀 Quick Start
 
+### Prerequisites
+
+- **NVIDIA GPU** with 12GB+ VRAM (RTX 3060 12GB/3070/3080/3090 or better)
+
+- **Docker Desktop** with GPU support
+- **16GB+ RAM** (32GB recommended for large documents)
+
+
 ### Local Development
 
-1. **Clone and Setup**:
 ```bash
-git clone [repository] gnosis-ocr
+# Clone the repository
+git clone https://github.com/kordless/gnosis-ocr.git
 cd gnosis-ocr
+
+# Create environment files
+cp .env.cloudrun.example .env.cloudrun
+# Edit PROJECT_ID if deploying to cloud
 cp .env.example .env
+
+# Build and run with GPU support
+docker-compose up --build
 ```
 
-2. **Run with Docker Compose V2**:
-```bash
-docker-compose -f docker-compose.v2.yml up --build
-```
-
-3. **Access Service**:
-- Web UI: http://localhost:7799
-- API Docs: http://localhost:7799/docs
-- Health Check: http://localhost:7799/health
+🎉 **That's it!** Visit http://localhost:7799 to start processing documents.
 
 ### Cloud Deployment
 
-**PowerShell (Recommended)**:
+Deploy to Google Cloud Run with NVIDIA L4 GPU:
+
 ```powershell
-.\scripts\build-deploy-v2.ps1
+# One-command deployment
+./scripts/deploy.ps1 -Target cloudrun
 ```
 
-**Quick Deploy Only**:
-```powershell
-.\scripts\deploy-v2-clean.ps1
+See [Deployment Guide](docs/UNIFIED_DEPLOYMENT.md) for detailed instructions.
+
+## 📸 Screenshots
+
+<div align="center">
+
+### Document Upload
+![Upload Interface](https://via.placeholder.com/600x300/2563eb/ffffff?text=Drag+%26+Drop+Interface)
+
+### Real-Time Processing
+![Processing View](https://via.placeholder.com/600x300/10b981/ffffff?text=Live+Progress+Tracking)
+
+### OCR Results
+![Results Display](https://via.placeholder.com/600x300/6366f1/ffffff?text=Extracted+Text+%26+Metadata)
+
+</div>
+
+## 🏗️ Architecture
+
+```mermaid
+graph TD
+    A[User Upload] --> B[FastAPI Backend]
+    B --> C[Document Processor]
+    C --> D[GPU OCR Engine]
+    D --> E[Text Extraction]
+    E --> F[GCS Storage]
+    F --> G[Results API]
+    G --> H[Web UI]
+    
+    subgraph "GPU Processing"
+        D --> I[Nanonets OCR-s Model]
+        I --> J[CUDA Acceleration]
+    end
+    
+    subgraph "Cloud Storage"
+        F --> K[Model Cache]
+        F --> L[User Data]
+        F --> M[Session Files]
+    end
 ```
 
-**Manual gcloud**:
-```bash
-gcloud run deploy gnosis-ocr \
-  --image gcr.io/gnosis-459403/gnosis-ocr:latest \
-  --platform managed \
-  --region us-central1 \
-  --gpu 1 --gpu-type nvidia-l4 \
-  --memory 16Gi --cpu 4 \
-  --add-volume name=model-cache,type=cloud-storage,bucket=gnosis-ocr-models \
-  --add-volume-mount volume=model-cache,mount-path=/cache
-```
+## 🎯 Performance
 
-## 📡 API Reference
+| Metric | Local (RTX 3090) | Cloud Run (L4) | 
+|--------|-------------------|--------------------|
+| **Model Startup** | ~4 minutes | ~30 seconds |
+| **Processing Speed** | ~20 sec/page | ~5-10 sec/page |
+| **Max File Size** | 500MB | 500MB |
+| **Concurrent Users** | 1-2 | 10+ |
+| **Model Loading** | Cached | Persistent Mount |
 
-### Core Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/upload` | Upload PDF (traditional or chunked) |
-| `POST` | `/upload/start` | Initialize chunked upload session |
-| `POST` | `/upload/chunk/{session}` | Upload file chunk |
-| `GET` | `/status/{session}` | Get processing status |
-| `GET` | `/results/{session}` | Get OCR results |
-| `GET` | `/download/{session}` | Download all files |
-
-### WebSocket
-- `WS` `/ws/progress/{session}` - Real-time progress updates
-
-### Utility Endpoints
-- `GET` `/health` - Service health check
-- `GET` `/cache/info` - Model cache information
-- `POST` `/api/log` - Frontend logging
 
 ## 🔧 Configuration
 
 ### Environment Variables
 
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DEVICE` | Processing device | `cuda` |
+| `MODEL_NAME` | OCR model to use | `nanonets/Nanonets-OCR-s` |
+| `MAX_FILE_SIZE` | Maximum upload size | `500MB` |
+| `SESSION_TIMEOUT` | Session duration | `3600` seconds |
+| `LOG_LEVEL` | Logging verbosity | `INFO` |
+
+
+### GPU Requirements
+
+- **Minimum**: 12GB VRAM (RTX 3060 12GB, RTX 3070)
+- **Recommended**: 12GB+ VRAM (RTX 3080/3090/4070 Ti/4080/4090)
+- **Cloud**: NVIDIA L4 (24GB VRAM)
+
+
+## 📖 Documentation
+
+- 📚 [Deployment Guide](docs/UNIFIED_DEPLOYMENT.md) - Complete deployment instructions
+- 🔧 [Setup Guide](docs/SETUP_DEPLOYMENT.md) - Development environment setup
+- 🌐 [API Reference](http://localhost:7799/docs) - Interactive OpenAPI documentation
+- 🐳 [Docker Guide](docs/DOCKER.md) - Container configuration and troubleshooting
+
+## 🚀 Deployment
+
+### Local Development
 ```bash
-# Core Configuration
-RUNNING_IN_CLOUD=true
-MODEL_NAME=nanonets/Nanonets-OCR-s
-PORT=7799
-CUDA_VISIBLE_DEVICES=0
-
-# Storage Configuration
-STORAGE_PATH=/tmp/storage
-GCS_BUCKET_NAME=gnosis-ocr-storage
-MODEL_BUCKET_NAME=gnosis-ocr-models
-
-# Cache Configuration (V2)
-MODEL_CACHE_PATH=/cache/huggingface
-HF_HOME=/cache/huggingface
-TRANSFORMERS_CACHE=/cache/huggingface
-HUGGINGFACE_HUB_CACHE=/cache/huggingface
-
-# File Limits
-MAX_FILE_SIZE=524288000  # 500MB
+docker-compose up --build
 ```
 
-## 🎯 Usage Examples
-
-### Simple Upload (≤10MB)
-```javascript
-const formData = new FormData();
-formData.append('file', pdfFile);
-
-const response = await fetch('/upload', {
-    method: 'POST',
-    body: formData
-});
+### Staging Environment
+```powershell
+./scripts/deploy.ps1 -Target staging
 ```
 
-### Chunked Upload (>10MB)
-```javascript
-// Automatic chunked upload for large files
-const fileInput = document.getElementById('file');
-const file = fileInput.files[0];
-
-if (file.size > 10 * 1024 * 1024) {
-    // Automatically uses chunked upload with WebSocket progress
-    await uploadFileChunked(file);
-}
+### Production (Cloud Run)
+```powershell
+./scripts/deploy.ps1 -Target cloudrun
 ```
 
-### WebSocket Progress
-```javascript
-const ws = new WebSocket(`ws://localhost:7799/ws/progress/${sessionId}`);
-ws.onmessage = (event) => {
-    const progress = JSON.parse(event.data);
-    console.log(`Progress: ${progress.progress_percent}%`);
-};
-```
-
-## 🧪 Testing
-
-### Local Testing
+### Cloud Build (CI/CD)
 ```bash
-# Run all tests
-docker-compose run --rm app pytest
-
-# Test cache functionality
-python test_cache_fix.py
-
-# Test large file upload
-curl -X POST -F "file=@large_document.pdf" http://localhost:7799/upload
+gcloud builds submit --config cloudbuild.yaml
 ```
 
-### Cache Validation
+## 📡 API Reference
+
+### Upload Document
 ```bash
-# Check model cache
-curl http://localhost:7799/cache/info
-
-# Verify HuggingFace files
-python check_model_files.py
+curl -X POST "http://localhost:7799/api/v1/jobs/submit" \
+  -H "Content-Type: multipart/form-data" \
+  -F "file=@document.pdf"
 ```
 
-## 🔍 Monitoring & Debugging
-
-### Health Monitoring
+### Check Status
 ```bash
-# Service health
-curl https://your-service-url/health
-
-# Cache status
-curl https://your-service-url/cache/info
-
-# Session debug
-curl https://your-service-url/api/debug/session/{session_hash}
+curl "http://localhost:7799/api/v1/jobs/{job_id}/status"
 ```
 
-### Log Analysis
+### Get Results
 ```bash
-# Cloud Run logs
-gcloud run services logs tail gnosis-ocr --region=us-central1
-
-# Frontend logs (sent to backend)
-# Check browser console and /api/log endpoint
+curl "http://localhost:7799/api/v1/jobs/{job_id}/result"
 ```
 
-## 🚨 Known Limitations
+Complete API documentation available at `/docs` endpoint.
 
-- **GPU Memory**: 5GB limit for model loading
-- **File Types**: PDF only (configurable in settings)
-- **Cold Start**: ~60 seconds for first model load
-- **Concurrency**: Limited by GPU memory (10 concurrent max)
+## 🏢 Enterprise Features
 
-## 🔧 Troubleshooting
+- **Multi-Tenant Architecture** - User isolation and data partitioning
+- **Audit Logging** - Complete request/response tracking
+- **Auto-Scaling** - Handles traffic spikes automatically
+- **Health Monitoring** - Built-in health checks and metrics
+- **Security** - CORS, rate limiting, and input validation
+- **Storage Integration** - Google Cloud Storage with lifecycle management
 
-### Common Issues
+## 🤝 Contributing
 
-1. **Model Download Fails**
-   - Check internet connectivity during first deploy
-   - Verify GCS bucket permissions
-   - See `HUGGINGFACE_ONLINE.md` for details
+We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
 
-2. **Large File Upload Timeout**
-   - Chunked upload automatically activates >10MB
-   - Check network stability for chunk failures
-
-3. **GPU Out of Memory**
-   - Reduce concurrent processing
-   - Check model cache is using GCS mount
-
-4. **Cache Not Working**
-   - Verify GCS FUSE mount at `/cache`
-   - Check environment variables match paths
-
-## 📈 Performance Optimization
-
-### For High Volume
-```yaml
-# Cloud Run scaling
---max-instances 10
---concurrency 5
---memory 16Gi
---cpu 4
-```
-
-### For Large Files
-```javascript
-// Increase chunk size for faster networks
-const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB chunks
-```
-
-### For Cold Starts
-```bash
-# Keep minimum instances warm
---min-instances 1
-```
-
-## 🔐 Security
-
-- Session-based isolation (no cross-user access)
-- User data partitioned by email hash
-- Secure file handling with validation
-- No persistent local storage of user data
-
-## 📚 Documentation
-
-- [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) - Complete deployment instructions
-- [API_DOCUMENTATION.md](API_DOCUMENTATION.md) - Detailed API reference
-- [HUGGINGFACE_ONLINE.md](HUGGINGFACE_ONLINE.md) - Caching strategy
-- [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) - Code organization
-
-## 🔄 Release Status
-
-**Current Version**: V2 Production Ready
-- ✅ Chunked streaming upload (500MB support)
-- ✅ WebSocket progress tracking
-- ✅ Intelligent HuggingFace caching
-- ✅ Cloud Run GPU deployment
-- ✅ Error resilience and retry logic
-- ✅ Production monitoring and debugging
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit changes (`git commit -m 'Add amazing feature'`)
+4. Push to branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
 ## 📄 License
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-    http://www.apache.org/licenses/LICENSE-2.0
+## 🙏 Acknowledgments
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+- **Nanonets** - For the excellent OCR model
+- **HuggingFace** - For the transformers library
+- **FastAPI** - For the robust web framework
+- **NVIDIA** - For CUDA and GPU acceleration
 
-See [LICENSE](LICENSE) for the full license text.
+## 📊 Analytics
 
+<div align="center">
+
+![GitHub stars](https://img.shields.io/github/stars/kordless/gnosis-ocr?style=social)
+![GitHub forks](https://img.shields.io/github/forks/kordless/gnosis-ocr?style=social)
+![GitHub issues](https://img.shields.io/github/issues/kordless/gnosis-ocr)
+![GitHub pull requests](https://img.shields.io/github/issues-pr/kordless/gnosis-ocr)
+
+</div>
+
+---
+
+<div align="center">
+
+**⭐ Star this repository if you find it useful! ⭐**
+
+[Report Bug](https://github.com/kordless/gnosis-ocr/issues) • [Request Feature](https://github.com/kordless/gnosis-ocr/issues) • [Join Discord](https://discord.gg/gnosis-ocr)
+
+</div>

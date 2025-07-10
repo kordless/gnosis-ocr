@@ -47,8 +47,11 @@ pyvenv.cfg
 # Project specific
 data/
 .env
+.env.cloudrun
 *.log
 logs/
+build-logs/
+
 
 # OCR session data
 /tmp/ocr_sessions/
@@ -59,8 +62,8 @@ ocr_sessions/
 *.jpeg
 
 # Model cache (if stored locally)
-models/
-model_cache/
+model-cache/
+model-cache/*
 .cache/
 
 # Claude specific
@@ -155,3 +158,9 @@ downloads/
 # Monitoring
 grafana-storage/
 prometheus-data/
+
+# Vibe directory
+vibe/
+
+# MCP directory
+mcp/

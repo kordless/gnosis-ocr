@@ -1,0 +1,100 @@
+# Git and version control
+.git
+.gitignore
+*.md
+README*
+LICENSE
+CHANGELOG*
+
+# Development files
+.env
+.env.local
+.env.example
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+htmlcov/
+.tox/
+.nox/
+tests/
+test_*.py
+*_test.py
+
+# Logs and temporary files
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Docker and deployment
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Scripts and tools (keep only what's needed)
+scripts/
+*.ps1
+*.bat
+# Keep .sh files for the container to use
+
+
+# Version backup directories
+.*_versions/
+vibe/
+
+# Data and storage directories
+data/
+storage/
+model_cache/
+*.sqlite
+*.db
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Backup and temporary files
+*.bak
+*.tmp
+*.temp
+*~

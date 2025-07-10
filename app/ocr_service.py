@@ -1,543 +1,660 @@
-"""OCR processing service using Nanonets-OCR-s model"""
+"""OCR Service - Offline-only version that assumes model is pre-loaded"""
+
+# ALLOW ONLINE MODE - HYBRID APPROACH
 import os
+# Remove offline restrictions - allow downloads when needed
+# os.environ['HF_HUB_OFFLINE'] = '1'
+# os.environ['TRANSFORMERS_OFFLINE'] = '1' 
+# os.environ['HF_DATASETS_OFFLINE'] = '1'
+# os.environ['HF_OFFLINE'] = '1'
+
+
+# Set HuggingFace home to our cache directory - ALWAYS use consistent path
+# Use HF_HOME (the new standard) instead of deprecated TRANSFORMERS_CACHE
+os.environ['HF_HOME'] = os.environ.get('MODEL_CACHE_PATH', '/app/cache')
+os.environ['HF_DATASETS_CACHE'] = os.environ.get('MODEL_CACHE_PATH', '/app/cache')
+
+
+
+import io
 import gc
-import json
-import asyncio
-from typing import List, Dict, Any, Optional, Tuple
-from pathlib import Path
-from datetime import datetime
 import torch
-from transformers import AutoModelForImageTextToText, AutoTokenizer, AutoProcessor
+import base64
+import traceback
+import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from typing import List, Dict, Any, Optional, Union
+from datetime import datetime
 from PIL import Image
-import fitz  # PyMuPDF
-import cv2
+import pdf2image
 import numpy as np
+from transformers import AutoModelForImageTextToText, AutoProcessor
 import structlog
-from io import BytesIO
 
-# DEBUG MODE: Set to True to skip inference and just extract/save images
-DEBUG_SKIP_INFERENCE = True
+from app.config import settings
 
-from app.config import settings, get_session_file_path
-from app.models import ProcessingStatus
-from app.storage_service import storage_service
 
 logger = structlog.get_logger()
 
-
 class OCRService:
-    """Handles OCR processing using the Nanonets model"""
+    """Service for performing OCR on images and PDFs using GPU acceleration"""
     
     def __init__(self):
         self.model = None
-        self.tokenizer = None
         self.processor = None
         self.device = None
-        self.model_loaded = False
+        self._model_loaded = False
+        self._loading = False
+        self._download_progress = {"status": "not_started", "progress": 0, "message": ""}
         
-    async def initialize(self):
-        """Initialize the OCR model"""
+        # Job management for production-grade processing
+        self.jobs = {}  # Store all jobs by ID {job_id: {status, data, result, created, etc}}
+        self.job_queue = []  # Queue for when model not ready
+        self.executor = ThreadPoolExecutor(max_workers=2)
+        
+        # Start background loading immediately (docext pattern)
+        logger.info("OCR Service initializing with background model loading...")
+        threading.Thread(target=self._background_load, daemon=True).start()
+
+    def _background_load(self):
+        """Background model loading with job queue processing"""
+        self._loading = True
         try:
-            logger.info("Initializing OCR model", model=settings.model_name)
+            logger.info("🔄 Starting background model loading...")
+            self.load_model()  # Your existing load_model code
+            self._model_loaded = True
+            logger.info("✅ Background model loading completed successfully")
             
-            # Check GPU availability
+            # Process any queued jobs
+            logger.info(f"📋 Processing {len(self.job_queue)} queued jobs...")
+            for job_id in list(self.job_queue):
+                self.process_job_async(job_id)
+                self.job_queue.remove(job_id)
+                
+        except Exception as e:
+            logger.error(f"❌ Background model loading failed: {e}")
+            self._model_loaded = False
+        finally:
+            self._loading = False
+
+    def health_check(self):
+        """Health check endpoint (docext pattern)"""
+        return {
+            "model_loaded": self._model_loaded,
+            "loading": self._loading,
+            "status": "ready" if self._model_loaded else "loading" if self._loading else "failed"
+        }
+
+    def get_model_status(self):
+        """Get the current model loading status"""
+        return {
+            "loaded": self._model_loaded,
+            "status": self._download_progress.get("status", "not_started"),
+            "message": self._download_progress.get("message", "")
+        }
+
+        
+    def load_model(self):
+        """Load the OCR model from local cache only - no downloads allowed"""
+        if self._model_loaded:
+            logger.debug("Model already loaded")
+            return
+        
+        try:
+            logger.info("Starting offline model load process...")
+            self._download_progress = {"status": "loading", "progress": 0, "message": "Checking local cache..."}
+            
+            # Set device
             if torch.cuda.is_available() and settings.device == "cuda":
                 self.device = torch.device("cuda")
-                gpu_name = torch.cuda.get_device_name(0)
-                logger.info("GPU available", device=gpu_name)
+                logger.info(f"Using GPU: {torch.cuda.get_device_name(0)}")
             else:
                 self.device = torch.device("cpu")
-                logger.warning("GPU not available, using CPU")
-                
-            # Load model and processor (following reference implementation)
-            logger.info("Loading tokenizer and processor")
+                logger.info("Using CPU")
             
-            # FORCE LOCAL CACHE USAGE - No hub downloads
-            cache_kwargs = {
-                "local_files_only": True,  # Critical: Force local cache usage
-                "trust_remote_code": True
-            }
+            # Use mounted cache directory - DEFAULT TO /app/cache which is what Docker uses!
+            cache_dir = os.environ.get('MODEL_CACHE_PATH', '/app/cache')
             
-            logger.info("Loading tokenizer and processor from LOCAL CACHE ONLY", 
-                       model=settings.model_name)
-            # Load tokenizer and processor (these are lightweight)
-            self.tokenizer = AutoTokenizer.from_pretrained(settings.model_name, **cache_kwargs)
-            self.processor = AutoProcessor.from_pretrained(settings.model_name, **cache_kwargs)
+            # DETAILED LOGGING - Let's see what's actually happening
+            logger.info(f"=== CACHE DIRECTORY INVESTIGATION ===")
+            logger.info(f"Environment MODEL_CACHE_PATH: {os.environ.get('MODEL_CACHE_PATH')}")
+            logger.info(f"Environment HF_HOME: {os.environ.get('HF_HOME')}")
+            logger.info(f"Using cache_dir: {cache_dir}")
+            logger.info(f"cache_dir exists: {os.path.exists(cache_dir)}")
             
-            logger.info("Loading model weights - this may take a moment")
-            
-            # Load model with proper configuration
-            model_kwargs = {
-                # CRITICAL: Force local cache usage only - NO HUB DOWNLOADS
-                "local_files_only": True,
-                "trust_remote_code": True,
-                # Memory optimization settings
-                "low_cpu_mem_usage": True,
-                "device_map": "auto"
-            }
-            
-            # Set dtype based on device
-            if self.device.type == "cuda":
-                model_kwargs["torch_dtype"] = torch.float16
-            else:
-                model_kwargs["torch_dtype"] = torch.float32
-            
-            # For CUDA, use memory-efficient loading
-            if self.device.type == "cuda":
-                # Conservative memory limit to avoid OOM
-                model_kwargs["max_memory"] = {0: "5GB"}  # Reduced from 6GB for safety
-                logger.info("Using GPU with memory limit", max_memory="5GB")
-            
-            logger.info("Loading model with LOCAL CACHE ONLY settings", 
-                       local_files_only=True, device=self.device.type)
+            # Runtime debug - what's actually in the cache?
+            try:
+                hub_contents = os.listdir(os.path.join(cache_dir, 'hub'))
+                logger.info(f"Hub contents at runtime: {hub_contents}")
+            except Exception as e:
+                logger.warning(f"Could not list hub contents: {e}")
 
             
-            self.model = AutoModelForImageTextToText.from_pretrained(
-                settings.model_name,
-                **model_kwargs
-            )
-            
-            # Set model to evaluation mode
-            self.model.eval()
-            self.model_loaded = True
-            
-            logger.info("OCR model initialized successfully")
-            
-        except Exception as e:
-            logger.error("Failed to initialize OCR model", error=str(e))
-            raise
-            
-    def is_ready(self) -> bool:
-        """Check if the service is ready to process"""
-        return self.model_loaded and self.model is not None
-        
-    def get_gpu_info(self) -> Dict[str, Any]:
-        """Get GPU information"""
-        if torch.cuda.is_available():
-            return {
-                'available': True,
-                'device_name': torch.cuda.get_device_name(0),
-                'device_count': torch.cuda.device_count(),
-                'current_device': torch.cuda.current_device(),
-                'memory_allocated': torch.cuda.memory_allocated(),
-                'memory_reserved': torch.cuda.memory_reserved()
-            }
-        return {'available': False}
-        
-    async def process_document(self, session_hash: str, file_path: str) -> Dict[str, Any]:
-        """Process a PDF document"""
-        try:
-            # Update status to processing
-            storage_service.update_session_status(
-                session_hash, 
-                ProcessingStatus.PROCESSING,
-                progress=0.0,
-                message="Starting document processing"
-            )
-            
-            # Phase 1: Extract all pages from PDF first (this is fast)
-            logger.info("Starting PDF extraction - model NOT loaded yet", session_hash=session_hash)
-            storage_service.update_session_status(
-                session_hash, 
-                ProcessingStatus.PROCESSING,
-                progress=0.0,
-                message="Extracting pages from PDF"
-            )
-            
-            # Extract pages WITHOUT loading any ML models
-            pages = await self._extract_pdf_pages(file_path)
-            total_pages = len(pages)
-            storage_service.update_session_metadata(session_hash, {'total_pages': total_pages})
-            
-            # Save all page images first
-            logger.info("Saving extracted page images", session_hash=session_hash, total_pages=total_pages)
-            for idx, page_image in enumerate(pages):
-                page_num = idx + 1
-                progress = (idx / total_pages) * 20  # 20% for extraction
+            if os.path.exists(cache_dir):
+                cache_contents = os.listdir(cache_dir)
+                logger.info(f"cache_dir contents: {cache_contents}")
                 
-                storage_service.update_session_status(
-                    session_hash,
-                    ProcessingStatus.PROCESSING,
-                    progress=progress,
-                    message=f"Saving page {page_num} of {total_pages}"
-                )
-                
-                image_bytes = self._image_to_bytes(page_image)
-                await storage_service.save_page_image(session_hash, page_num, image_bytes)
+                # Check for hub directory
+                hub_path = os.path.join(cache_dir, 'hub')
+                if os.path.exists(hub_path):
+                    hub_contents = os.listdir(hub_path)
+                    logger.info(f"hub directory exists with contents: {hub_contents}")
+                else:
+                    logger.warning(f"hub directory does NOT exist at: {hub_path}")
             
-            logger.info("All pages extracted and saved. NOW checking if we should load model.", session_hash=session_hash)
+            # Let HuggingFace handle cache resolution - don't manually check paths!
+            logger.info(f"Model name from settings: {settings.model_name}")
+            logger.info("Letting HuggingFace resolve cache location...")
+
+            self._download_progress = {"status": "loading", "progress": 20, "message": "Loading model from cache..."}
             
-            # DEBUG MODE: Skip inference entirely
-            if DEBUG_SKIP_INFERENCE:
-                logger.info("🚨 DEBUG MODE ACTIVE: Skipping inference, returning mock results", session_hash=session_hash)
-                return await self._create_debug_results(session_hash, pages)
+            # Load model FIRST (like the working code does)
+            logger.info("Loading model from local cache...")
             
-            # Phase 2: Initialize model if needed (AFTER all extraction is done)
-            if not self.is_ready():
-                logger.info("Model not loaded, initializing now...", session_hash=session_hash)
-                storage_service.update_session_status(
-                    session_hash,
-                    ProcessingStatus.PROCESSING,
-                    progress=20.0,
-                    message="Loading OCR model (this may take a moment)..."
-                )
-                await self.initialize()
-                logger.info("OCR model loaded successfully", session_hash=session_hash)
+            # Define kwargs OUTSIDE try block so they're available in except
+            # Use HF_HOME for cache_dir to ensure proper path resolution
+            hf_home = os.environ.get('HF_HOME', cache_dir)
             
-            # Phase 3: Process OCR on all pages
-            logger.info("Starting OCR processing", session_hash=session_hash)
-            results = []
-            combined_text = []
-            
-            for idx, page_image in enumerate(pages):
-                page_num = idx + 1
-                progress = 20 + ((idx / total_pages) * 80)  # 80% for OCR
-                
-                # Update progress
-                storage_service.update_session_status(
-                    session_hash,
-                    ProcessingStatus.PROCESSING,
-                    progress=progress,
-                    message=f"Processing OCR for page {page_num} of {total_pages}",
-                    current_page=page_num
-                )
-                
-                # Process OCR with extensive logging
-                logger.info("🔍 STARTING OCR for page", session_hash=session_hash, page=page_num)
-                try:
-                    page_text = await self._process_page(page_image)
-                    logger.info("✅ OCR COMPLETED for page", session_hash=session_hash, page=page_num)
-                except Exception as ocr_error:
-                    logger.error("💥 OCR FAILED for page", session_hash=session_hash, page=page_num, error=str(ocr_error))
-                    page_text = f"[OCR ERROR on page {page_num}]: {str(ocr_error)}"
-                
-                # Save page result
-                await storage_service.save_page_result(session_hash, page_num, page_text)
-                
-                results.append({
-                    'page_number': page_num,
-                    'text': page_text
-                })
-                combined_text.append(f"## Page {page_num}\n\n{page_text}")
-                
-                # Clean up memory periodically
-                if idx % 10 == 0:
-                    gc.collect()
-                    if self.device.type == "cuda":
-                        torch.cuda.empty_cache()
-                        
-            # Save combined result
-            combined_markdown = "\n\n---\n\n".join(combined_text)
-            await storage_service.save_combined_result(session_hash, combined_markdown)
-            
-            # Save metadata
-            metadata = {
-                'model': settings.model_name,
-                'device': self.device.type,
-                'total_pages': total_pages,
-                'processed_at': datetime.utcnow().isoformat()
-            }
-            
+            # Smart device mapping based on available VRAM
             if self.device.type == "cuda":
-                metadata['gpu_name'] = torch.cuda.get_device_name(0)
+                vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                model_memory_needed = 3.5  # float16 approximate size
                 
-            metadata_path = get_session_file_path(
-                session_hash, 'metadata.json', 'output'
-            )
-            with open(metadata_path, 'w') as f:
-                json.dump(metadata, f, indent=2)
-                
-            # Update status to completed
-            storage_service.update_session_status(
-                session_hash,
-                ProcessingStatus.COMPLETED,
-                progress=100.0,
-                message="Processing completed successfully"
-            )
+                if vram_gb > model_memory_needed + 1.0:  # 1GB buffer for operations
+                    device_map = None
+                    offload_folder = None
+                    logger.info(f"Model will fit in {vram_gb:.1f}GB VRAM, using direct GPU loading")
+                else:
+                    # Use sequential split with disk offloading for better stability
+                    device_map = "sequential"
+                    offload_folder = os.path.join(cache_dir, "offload")
+                    os.makedirs(offload_folder, exist_ok=True)
+                    logger.info(f"Only {vram_gb:.1f}GB VRAM available, using sequential split with disk offload")
+                    logger.info(f"Offload folder: {offload_folder}")
+            else:
+                device_map = None  # CPU only
+                offload_folder = None
+                logger.info("Using CPU only")
             
-            logger.info("Document processing completed", 
-                       session_hash=session_hash, 
-                       total_pages=total_pages)
+            # Note: Flash Attention removed - using standard attention for maximum compatibility
+            flash_attn_available = False
+            logger.info("ℹ️  Using standard attention implementation")
+
             
-            return {
-                'status': 'completed',
-                'total_pages': total_pages,
-                'results': results
+            model_kwargs = {
+                "torch_dtype": "auto",
+                "device_map": "auto", 
+                "local_files_only": False,  # Allow downloads when needed
+                "cache_dir": hf_home,  # Use HF_HOME to match download location
+                "trust_remote_code": True,  # Need this for Nanonets model
+                "force_download": False,  # Don't re-download if cache exists
+                "resume_download": False  # Don't resume partial downloads
             }
+
             
-        except Exception as e:
-            logger.error("Error processing document", 
-                        session_hash=session_hash, 
-                        error=str(e))
+            processor_kwargs = {
+                "local_files_only": False,  # Allow downloads when needed
+                "cache_dir": hf_home,  # Use HF_HOME to match download location
+                "trust_remote_code": True,  # Need this for Nanonets model
+                "force_download": False,  # Don't re-download if cache exists
+                "resume_download": False,  # Don't resume partial downloads
+                "min_pixels": 256 * 28 * 28,  # ~200K pixels - memory optimization
+                "max_pixels": 1280 * 28 * 28   # ~1M pixels - prevent memory explosion
+            }
+
             
-            storage_service.update_session_status(
-                session_hash,
-                ProcessingStatus.FAILED,
-                message=f"Processing failed: {str(e)}"
-            )
-            raise
-            
-    async def _create_debug_results(self, session_hash: str, pages: List) -> Dict[str, Any]:
-        """Create mock results for debug mode (no inference)"""
-        try:
-            logger.info("🔧 Creating debug results without inference", session_hash=session_hash)
-            total_pages = len(pages)
-            results = []
-            combined_text = []
-            
-            for idx, page_image in enumerate(pages):
-                page_num = idx + 1
-                progress = 20 + ((idx / total_pages) * 80)  # 80% for "processing"
-                
-                logger.info(f"🔧 DEBUG: Mock processing page {page_num}/{total_pages}", session_hash=session_hash)
-                
-                # Update progress
-                storage_service.update_session_status(
-                    session_hash,
-                    ProcessingStatus.PROCESSING,
-                    progress=progress,
-                    message=f"DEBUG: Mock processing page {page_num} of {total_pages}",
-                    current_page=page_num
+            try:
+                logger.info(f"Attempting to load model with kwargs: {model_kwargs}")
+                self.model = AutoModelForImageTextToText.from_pretrained(
+                    settings.model_name,
+                    **model_kwargs
                 )
+                self.model.eval()
+                logger.info("✅ Model loaded successfully from cache")
+
+
+
+                self._download_progress = {"status": "loading", "progress": 60, "message": "Loading processor from cache..."}
                 
-                # Create mock text with image info
-                mock_text = f"[DEBUG MODE] This is mock OCR text for page {page_num}.\n\nImage size: {page_image.size}\nImage mode: {page_image.mode}\n\nInference was skipped to debug image extraction and status endpoints."
+                # Now load processor AFTER model (following working pattern)
+                logger.info(f"Loading processor with kwargs: {processor_kwargs}")
+                self.processor = AutoProcessor.from_pretrained(
+                    settings.model_name,
+                    **processor_kwargs
+                )
+                logger.info("✅ Processor loaded successfully from cache")
+
+
                 
-                # Save page result
-                await storage_service.save_page_result(session_hash, page_num, mock_text)
+                # Optional: Load tokenizer separately (like working code)
+                try:
+                    from transformers import AutoTokenizer
+                    self.tokenizer = AutoTokenizer.from_pretrained(
+                        settings.model_name,
+                        **processor_kwargs
+                    )
+                    logger.info("✅ Tokenizer loaded successfully from cache")
+                except Exception as tok_e:
+                    logger.warning(f"Tokenizer load skipped: {str(tok_e)}")
+                    self.tokenizer = None
                 
-                results.append({
-                    'page_number': page_num,
-                    'text': mock_text
-                })
-                combined_text.append(f"## Page {page_num}\n\n{mock_text}")
-            
-            # Save combined result
-            combined_markdown = "\n\n---\n\n".join(combined_text)
-            await storage_service.save_combined_result(session_hash, combined_markdown)
-            
-            # Update status to completed
-            storage_service.update_session_status(
-                session_hash,
-                ProcessingStatus.COMPLETED,
-                progress=100.0,
-                message="DEBUG: Mock processing completed successfully"
-            )
-            
-            logger.info("🎉 DEBUG: Mock processing completed successfully", session_hash=session_hash, total_pages=total_pages)
-            
-            return {
-                'status': 'completed',
-                'total_pages': total_pages,
-                'results': results
-            }
-            
-        except Exception as e:
-            logger.error("💥 Error in debug mode processing", session_hash=session_hash, error=str(e))
-            storage_service.update_session_status(
-                session_hash,
-                ProcessingStatus.FAILED,
-                message=f"DEBUG processing failed: {str(e)}"
-            )
-            raise
-            
-    async def _extract_pdf_pages(self, pdf_path: str) -> List[Image.Image]:
-        """Extract pages from PDF as PIL images"""
-        pages = []
-        
-        # Open PDF
-        pdf_document = fitz.open(pdf_path)
-        
-        try:
-            for page_num in range(min(len(pdf_document), settings.max_pages)):
-                page = pdf_document[page_num]
+            except RuntimeError as e:
+                if "can't move a model" in str(e).lower() and "offloaded" in str(e).lower():
+                    logger.error("Accelerate offloading error detected!")
+                    logger.error("This happens when model was partially downloaded or cache was moved.")
+                    logger.error("Solution: Delete cache and re-download, or use device_map='auto'")
+                    raise RuntimeError(
+                        "Model has offloaded layers and cannot be moved. "
+                        "This usually means the cache is corrupted or was moved after download. "
+                        "Please rebuild the Docker image or delete /app/cache and re-download."
+                    ) from e
+                else:
+                    raise
+            except Exception as e:
+                logger.warning(f"Failed without trust_remote_code: {str(e)}")
+                logger.info("Retrying WITH trust_remote_code=True...")
+
                 
-                # Render page at high resolution
-                mat = fitz.Matrix(2.0, 2.0)  # 2x scaling for better quality
-                pix = page.get_pixmap(matrix=mat)
+                # Retry with trust_remote_code - model first
+                model_kwargs["trust_remote_code"] = True
+                processor_kwargs["trust_remote_code"] = True
+                # Ensure memory optimizations are preserved in retry
+
+                if "min_pixels" not in processor_kwargs:
+                    processor_kwargs["min_pixels"] = 256 * 28 * 28
+                    processor_kwargs["max_pixels"] = 1280 * 28 * 28
                 
-                # Convert to PIL Image
-                img_data = pix.tobytes("png")
-                img = Image.open(BytesIO(img_data))
-                
-                # Convert to RGB if necessary
-                if img.mode != 'RGB':
-                    img = img.convert('RGB')
+                try:
+                    self.model = AutoModelForImageTextToText.from_pretrained(
+                        settings.model_name,
+                        **model_kwargs
+                    )
+                    self.model.eval()
+                    logger.info("✅ Model loaded successfully with trust_remote_code")
+
                     
-                pages.append(img)
+                    self.processor = AutoProcessor.from_pretrained(
+                        settings.model_name,
+                        **processor_kwargs
+                    )
+                    logger.info("✅ Processor loaded successfully with trust_remote_code")
+
+                except RuntimeError as e:
+                    if "can't move a model" in str(e).lower() and "offloaded" in str(e).lower():
+                        logger.error("Accelerate offloading error on retry!")
+                        raise RuntimeError(
+                            "Critical: Model cache is corrupted. Please rebuild the container."
+                        ) from e
+                    else:
+                        raise
+
                 
-        finally:
-            pdf_document.close()
+                # Optional: Load tokenizer separately (like working code)
+                try:
+                    from transformers import AutoTokenizer
+                    self.tokenizer = AutoTokenizer.from_pretrained(
+                        settings.model_name,
+                        **processor_kwargs
+                    )
+                    logger.info("✅ Tokenizer loaded successfully with trust_remote_code")
+                except Exception as tok_e:
+                    logger.warning(f"Tokenizer load skipped: {str(tok_e)}")
+                    self.tokenizer = None
+
+
             
-        return pages
-        
-    async def _process_page(self, image: Image.Image) -> str:
-        """Process a single page with OCR"""
+            # Move to device if needed
+            # if self.device.type == "cuda":
+            #     self.model = self.model.to(self.device)
+
+
+
+            
+            self._model_loaded = True
+            self._download_progress = {"status": "completed", "progress": 100, "message": "Model ready for use"}
+            
+            logger.info("Offline model initialization complete")
+            logger.info(f"Model type: {self.model.config.model_type if hasattr(self.model.config, 'model_type') else 'unknown'}")
+            
+        except Exception as e:
+            error_msg = f"Failed to load model from cache: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            self._download_progress = {"status": "failed", "progress": 0, "message": error_msg}
+            raise
+
+    
+    def process_image(self, image: Union[Image.Image, np.ndarray]) -> Dict[str, Any]:
+        """Process a single image and extract text"""
         try:
-            logger.info("🔧 _process_page: Starting page processing", image_size=image.size)
+            if not self._model_loaded:
+                if self._loading:
+                    # Wait for background loading to complete
+                    import time
+                    logger.info("⏳ Model still loading in background, waiting for completion...")
+                    while self._loading and not self._model_loaded:
+                        time.sleep(1)
+                    if not self._model_loaded:
+                        raise RuntimeError("Model loading failed")
+                    logger.info("✅ Background model loading completed, proceeding with image processing")
+                else:
+                    raise RuntimeError("Model not loaded and not loading")
             
-            # Check if processor is initialized
-            if self.processor is None:
-                logger.error("💥 Processor not initialized!")
-                raise RuntimeError("Processor not initialized")
-                
-            logger.info("✅ Processor is initialized")
+            # Convert numpy array to PIL Image if needed
+            if isinstance(image, np.ndarray):
+                image = Image.fromarray(image)
             
-            # Preprocess image if needed
-            logger.info("🔧 Starting image preprocessing")
-            image = self._preprocess_image(image)
-            logger.info("✅ Image preprocessing completed", processed_size=image.size)
-            
-            # Process with model
-            logger.info("🔧 Processing image with processor", image_size=image.size)
-            try:
-                # Format messages for the model (based on reference implementation)
-                logger.info("🔧 Creating prompt and messages")
-                prompt = """Extract the text from the above document as if you were reading it naturally. Return the tables in html format. Return the equations in LaTeX representation. If there is an image in the document and image caption is not present, add a small description of the image inside the <img></img> tag; otherwise, add the image caption inside <img></img>. Watermarks should be wrapped in brackets. Ex: <watermark>OFFICIAL COPY</watermark>. Page numbers should be wrapped in brackets. Ex: <page_number>14</page_number> or <page_number>9/22</page_number>. Prefer using ☐ and ☑ for check boxes."""
-                
-                messages = [
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": [
-                        {"type": "image"},
-                        {"type": "text", "text": prompt},
-                    ]},
-                ]
-                
-                # Apply chat template
-                logger.info("🔧 Applying chat template")
-                text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-                logger.info("✅ Chat template applied successfully")
-                
-                logger.info("🔧 Processing inputs with processor (THIS MAY HANG)")
-                inputs = self.processor(text=[text], images=[image], padding=True, return_tensors="pt")
-                logger.info("✅ Processor completed successfully")
-                
-            except Exception as proc_error:
-                logger.error("💥 Processor failed", error=str(proc_error), exc_info=True)
-                raise
-                
-            if inputs is None:
-                logger.error("💥 Processor returned None!")
-                raise ValueError("Processor returned None")
-            
-            logger.info("✅ Inputs created successfully")
-            
-            # Move inputs to device
-            try:
-                logger.info("🔧 Moving inputs to device", device=self.device)
-                inputs = {k: v.to(self.device) if hasattr(v, 'to') else v for k, v in inputs.items()}
-                logger.info("✅ Inputs moved to device successfully")
-            except Exception as move_error:
-                logger.error("💥 Failed to move inputs to device", error=str(move_error))
-                raise
-            
-            logger.info("🔧 Starting model.generate() - THIS IS WHERE IT LIKELY HANGS")
-            with torch.no_grad():
-                output_ids = self.model.generate(
-                    **inputs,
-                    max_new_tokens=settings.max_new_tokens,
-                    do_sample=False
-                )
-            logger.info("✅ model.generate() completed successfully!")
-                
-            # Extract only the generated tokens (based on reference implementation)
-            # inputs is a dict with 'input_ids' key
-            generated_ids = [
-                output_ids[len(input_ids):] 
-                for input_ids, output_ids in zip(inputs['input_ids'], output_ids)
+            # Process the image - Qwen2.5-VL requires chat template format
+            messages = [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "Extract the text from the above document as if you were reading it naturally. Return the tables in html format. Return the equations in LaTeX representation. If there is an image in the document and image caption is not present, add a small description of the image inside the <img></img> tag; otherwise, add the image caption inside <img></img>. Watermarks should be wrapped in brackets. Ex: <watermark>OFFICIAL COPY</watermark>. Page numbers should be wrapped in brackets. Ex: <page_number>14</page_number> or <page_number>9/22</page_number>. Prefer using ☐ and ☑ for check boxes."},
+
+
+                ]},
             ]
             
-            # Decode the output
-            output_text = self.processor.batch_decode(
-                generated_ids, 
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=True
-            )
-            generated_text = output_text[0]
+            # Inputs are already on correct device thanks to device_map optimization
+            logger.info(f"Using optimized device mapping - inputs should be on {self.device}")
             
-            # Post-process the text
-            processed_text = self._postprocess_text(generated_text)
+            # Apply chat template and process inputs
+            text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            inputs = self.processor(text=[text], images=[image], padding=True, return_tensors="pt")
             
-            return processed_text
+            # Move to device if needed (should be minimal with device_map optimization)
+            if hasattr(self.model, 'device') and self.model.device != self.device:
+                inputs = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+
+
+            
+            # Generate text with memory optimization for 12GB GPU
+            logger.info(f"🔍 Starting OCR extraction for image size: {image.size}")
+            logger.info(f"🔍 Chat template applied, input tensor shapes: {[(k, v.shape if hasattr(v, 'shape') else len(v)) for k, v in inputs.items()]}")
+            
+            with torch.no_grad():
+                # Use gradient checkpointing and reduce max tokens for memory efficiency
+                logger.info("🔍 Generating text with model...")
+                generated_ids = self.model.generate(
+                    **inputs, 
+                    max_new_tokens=2048,  # Increased back to 2048 for complete text extraction
+                    do_sample=False,     # Deterministic generation saves memory
+                    use_cache=True,      # Enable KV cache for efficiency
+                    pad_token_id=self.model.config.eos_token_id,  # Prevent padding issues
+                    temperature=None,    # Explicitly disable temperature for deterministic generation
+                    top_p=None,         # Disable top_p sampling
+                    top_k=None          # Disable top_k sampling
+                )
+                logger.info(f"🔍 Generation complete, output shape: {generated_ids.shape}")
+            
+            # Decode the generated text (processor can handle GPU tensors)
+            logger.info("🔍 Decoding generated tokens...")
+            generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            
+            # Strip the chat template from the output
+            # The model outputs the entire conversation, we only want the assistant's response
+            if "assistant\n" in generated_text:
+                generated_text = generated_text.split("assistant\n", 1)[1]
+            
+            # Remove any remaining system/user prompts that might have leaked through
+            lines = generated_text.split('\n')
+            cleaned_lines = []
+            for line in lines:
+                if line.strip() and not line.startswith('system') and not line.startswith('user') and not line.startswith('assistant'):
+                    cleaned_lines.append(line)
+            generated_text = '\n'.join(cleaned_lines)
+            
+            # Log extraction results
+            text_length = len(generated_text)
+            text_preview = generated_text[:200] + "..." if text_length > 200 else generated_text
+            logger.info(f"🔍 OCR extraction complete! Text length: {text_length} chars")
+            logger.info(f"🔍 Text preview: {text_preview}")
+            
+            return {
+                "text": generated_text,
+                "confidence": 0.95,  # Placeholder confidence
+                "processing_time": 0,
+                "image_size": image.size
+            }
             
         except Exception as e:
-            logger.error("Error processing page", error=str(e), exc_info=True)
-            return f"Error processing page: {str(e)}"
+            logger.error(f"Error processing image: {str(e)}")
+            raise
+    
+    def process_pdf(self, pdf_content: bytes, progress_callback=None) -> List[Dict[str, Any]]:
+        """Process a PDF file and extract text from all pages"""
+        try:
+            if not self._model_loaded:
+                if self._loading:
+                    # Wait for background loading to complete
+                    import time
+                    logger.info("⏳ Model still loading in background, waiting for completion...")
+                    while self._loading and not self._model_loaded:
+                        time.sleep(1)
+                    if not self._model_loaded:
+                        raise RuntimeError("Model loading failed")
+                    logger.info("✅ Background model loading completed, proceeding with PDF processing")
+                else:
+                    raise RuntimeError("Model not loaded and not loading")
             
-    def _preprocess_image(self, image: Image.Image) -> Image.Image:
-        """Preprocess image for better OCR results"""
-        # Convert PIL to numpy array
-        img_array = np.array(image)
-        
-        # Apply basic image enhancements
-        # Convert to grayscale
-        if len(img_array.shape) == 3:
-            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = img_array
+            # Convert PDF to images
+            logger.info("Starting PDF to image conversion")
+            images = pdf2image.convert_from_bytes(
+                pdf_content,
+                dpi=150,  # Use 150 DPI for memory efficiency with 12GB GPU
+                fmt='PNG',
+                thread_count=2
+            )
+            logger.info(f"Successfully converted PDF to {len(images)} images")
             
-        # Apply adaptive thresholding for better contrast
-        enhanced = cv2.adaptiveThreshold(
-            gray, 255, 
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY,
-            11, 2
-        )
-        
-        # Denoise
-        denoised = cv2.fastNlMeansDenoising(enhanced)
-        
-        # Convert back to PIL Image
-        return Image.fromarray(denoised)
-        
-    def _postprocess_text(self, text: str) -> str:
-        """Post-process OCR output"""
-        # Clean up common OCR artifacts
-        text = text.strip()
-        
-        # Fix common LaTeX equation formatting
-        text = text.replace('\\\\(', '$')
-        text = text.replace('\\\\)', '$')
-        text = text.replace('\\\\[', '$$')
-        text = text.replace('\\\\]', '$$')
-        
-        # Remove excessive whitespace
-        lines = text.split('\n')
-        cleaned_lines = []
-        for line in lines:
-            line = line.strip()
-            if line:
-                cleaned_lines.append(line)
+            results = []
+            total_pages = len(images)
+            
+            for i, image in enumerate(images):
+                current_page = i + 1
                 
-        return '\n\n'.join(cleaned_lines)
-        
-    def _image_to_bytes(self, image: Image.Image) -> bytes:
-        """Convert PIL Image to bytes"""
-        buffer = BytesIO()
-        image.save(buffer, format='PNG')
-        return buffer.getvalue()
-        
-    async def cleanup(self):
-        """Clean up resources"""
-        if self.model is not None:
-            del self.model
-            self.model = None
+                # Update progress BEFORE processing
+                if progress_callback:
+                    import asyncio
+                    if asyncio.iscoroutinefunction(progress_callback):
+                        # Run async callback in thread-safe way
+                        loop = asyncio.get_event_loop()
+                        loop.create_task(progress_callback(current_page=current_page, total_pages=total_pages))
+                    else:
+                        progress_callback(current_page=current_page, total_pages=total_pages)
+                
+                logger.info(f"🔍 Processing page {current_page}/{total_pages}")
+                
+                # Process each page
+                page_result = self.process_image(image)
+                page_result["page_number"] = current_page
+                results.append(page_result)
+                
+                logger.info(f"✅ Completed page {current_page}/{total_pages}")
+                
+                # Clear GPU memory after each page if using CUDA
+                if self.device.type == "cuda":
+                    torch.cuda.empty_cache()
             
-        if self.tokenizer is not None:
-            del self.tokenizer
-            self.tokenizer = None
+            return results
             
-        if self.processor is not None:
-            del self.processor
-            self.processor = None
-            
-        gc.collect()
+        except Exception as e:
+            logger.error(f"Error processing PDF: {str(e)}")
+            raise
+    
+    def is_ready(self) -> bool:
+        """Check if the model is loaded and ready"""
+        return self._model_loaded
+    
+    def get_gpu_info(self) -> Dict[str, Any]:
+        """Get GPU information if available"""
         if torch.cuda.is_available():
+            return {
+                "cuda_available": True,
+                "device_count": torch.cuda.device_count(),
+                "current_device": torch.cuda.current_device(),
+                "device_name": torch.cuda.get_device_name(0),
+                "memory_allocated": torch.cuda.memory_allocated(0),
+                "memory_reserved": torch.cuda.memory_reserved(0)
+            }
+        return {"cuda_available": False}
+    
+    def clear_memory(self):
+        """Clear GPU memory"""
+        if self.device and self.device.type == "cuda":
             torch.cuda.empty_cache()
+        gc.collect()
+
+    async def cleanup(self):
+        """Cleanup method for graceful shutdown"""
+        try:
+            logger.info("Starting OCR service cleanup")
             
-        self.model_loaded = False
-        logger.info("OCR service cleaned up")
+            # Clear GPU memory
+            self.clear_memory()
+            
+            # Unload model to free memory
+            if self._model_loaded:
+                logger.info("Unloading OCR model")
+                del self.model
+                del self.processor
+                self.model = None
+                self.processor = None
+                self._model_loaded = False
+            
+            # Final memory cleanup
+            if self.device and self.device.type == "cuda":
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            
+            gc.collect()
+            logger.info("OCR service cleanup completed")
+            
+        except Exception as e:
+            logger.error("Error during OCR service cleanup", error=str(e), exc_info=True)
 
+    def submit_job(self, image_data, job_type="image"):
+        """Submit OCR job, return job ID immediately"""
+        from datetime import datetime
+        
+        job_id = str(uuid.uuid4())
+        
+        # Create job record
+        job_data = {
+            "status": "queued",
+            "type": job_type,
+            "data": image_data,
+            "created": datetime.utcnow().isoformat(),
+            "result": None,
+            "error": None,
+            "progress": {
+                "current_step": "queued",
+                "message": "Job queued, waiting for model to be ready",
+                "current_page": 0,
+                "total_pages": 0,
+                "percent": 0
+            }
+        }
+        
+        self.jobs[job_id] = job_data
+        
+        if not self._model_loaded:
+            if self._loading:
+                # Queue the job until model ready
+                self.job_queue.append(job_id)
+                logger.info(f"📋 Job {job_id} queued - model still loading")
+            else:
+                # Model failed to load
+                job_data["status"] = "failed"
+                job_data["error"] = "Model failed to load"
+                logger.error(f"❌ Job {job_id} failed - model not loaded")
+        else:
+            # Process immediately if model ready
+            self.process_job_async(job_id)
+            logger.info(f"🚀 Job {job_id} submitted for immediate processing")
+        
+        return job_id
+    
+    def process_job_async(self, job_id):
+        """Process job in background thread"""
+        def _process():
+            try:
+                job = self.jobs[job_id]
+                job['status'] = 'processing'
+                logger.info(f"🔄 Processing job {job_id}")
+                
+                file_data = job['data']
+                if job['type'] == "image":
+                    # Update progress for image processing
+                    job['progress'] = {
+                        "current_step": "processing",
+                        "message": "Processing image...",
+                        "current_page": 1,
+                        "total_pages": 1,
+                        "percent": 50
+                    }
+                    
+                    from PIL import Image
+                    import io
+                    image = Image.open(io.BytesIO(file_data))
+                    result = self.process_image(image)
+                    
+                elif job['type'] == "pdf":
+                    # Update progress for PDF processing
+                    job['progress'] = {
+                        "current_step": "converting",
+                        "message": "Converting PDF to images...",
+                        "current_page": 0,
+                        "total_pages": 0,
+                        "percent": 10
+                    }
+                    
+                    # Create progress callback to update job status
+                    def progress_callback(current_page, total_pages):
+                        percent = int((current_page / total_pages) * 80) + 10 if total_pages > 0 else 50
+                        job['progress'] = {
+                            "current_step": "processing",
+                            "message": f"Processing OCR on page {current_page} of {total_pages}...",
+                            "current_page": current_page,
+                            "total_pages": total_pages,
+                            "percent": percent
+                        }
+                    
+                    result = self.process_pdf(file_data, progress_callback=progress_callback)
+                    
+                else:
+                    raise ValueError(f"Unknown job type: {job['type']}")
+                
+                # Final completion
+                job['status'] = 'completed'
+                job['result'] = result
+                job['completed'] = datetime.utcnow().isoformat()
+                job['progress'] = {
+                    "current_step": "completed",
+                    "message": "Processing complete!",
+                    "current_page": job['progress'].get('total_pages', 1),
+                    "total_pages": job['progress'].get('total_pages', 1),
+                    "percent": 100
+                }
+                logger.info(f"✅ Job {job_id} completed successfully")
+                
+            except Exception as e:
+                job['status'] = 'failed'
+                job['error'] = str(e)
+                job['progress'] = {
+                    "current_step": "failed",
+                    "message": f"Processing failed: {str(e)}",
+                    "current_page": job['progress'].get('current_page', 0),
+                    "total_pages": job['progress'].get('total_pages', 0),
+                    "percent": 0
+                }
+                logger.error(f"❌ Job {job_id} failed: {e}")
+        
+        self.executor.submit(_process)
+    
+    def get_job_status(self, job_id):
+        """Get job result by ID"""
+        return self.jobs.get(job_id, {"status": "not_found"})
 
-# Global OCR service instance
+# Global instance
 ocr_service = OCRService()

@@ -1,0 +1,259 @@
+{% extends "base.html" %}
+
+{% block title %}Full Result - Job {{ job.job_id }} | Gnosis OCR{% endblock %}
+
+{% block extra_head %}
+<style>
+/* Full result page specific styles */
+.result-container {
+    background-color: var(--bg-primary);
+    border-radius: 0.75rem;
+    padding: 2rem;
+    box-shadow: var(--shadow-md);
+    margin-bottom: 2rem;
+}
+
+.result-header {
+    margin-bottom: 2rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.job-id {
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    margin-top: 0.5rem;
+}
+
+.result-content {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    padding: 2rem;
+    margin: 2rem 0;
+    min-height: 400px;
+    max-height: 80vh;
+    overflow-y: auto;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 0.875rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+.result-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    margin: 1.5rem 0;
+}
+
+.stat-item {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 0.375rem;
+    padding: 1rem;
+    text-align: center;
+}
+
+.stat-item strong {
+    color: var(--text-primary);
+    display: block;
+    margin-bottom: 0.25rem;
+    font-size: 0.875rem;
+}
+
+.stat-value {
+    color: var(--text-secondary);
+    font-size: 1.25rem;
+    font-weight: 600;
+}
+
+.actions {
+    display: flex;
+    gap: 0.75rem;
+    justify-content: center;
+    margin: 2rem 0;
+    flex-wrap: wrap;
+}
+
+.copy-button {
+    background-color: var(--success-color);
+    color: white;
+    border: none;
+    border-radius: 0.375rem;
+    padding: 0.75rem 1.5rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.copy-button:hover {
+    background-color: var(--success-hover);
+    transform: translateY(-1px);
+}
+
+.copy-button:active {
+    transform: translateY(0);
+}
+
+.copy-success {
+    background-color: var(--primary-color) !important;
+}
+
+/* Download button */
+.download-button {
+    background-color: var(--warning-color);
+    color: white;
+    text-decoration: none;
+    border-radius: 0.375rem;
+    padding: 0.75rem 1.5rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    transition: all 0.2s ease;
+    display: inline-block;
+}
+
+.download-button:hover {
+    background-color: var(--warning-hover);
+    color: white;
+    text-decoration: none;
+    transform: translateY(-1px);
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+    .result-container {
+        padding: 1rem;
+    }
+    
+    .result-content {
+        padding: 1rem;
+        font-size: 0.8rem;
+    }
+    
+    .actions {
+        flex-direction: column;
+        align-items: center;
+    }
+    
+    .copy-button, .download-button {
+        width: 100%;
+        max-width: 300px;
+    }
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="result-container">
+    <div class="result-header">
+        <h1>Full OCR Result</h1>
+        <div class="job-id">Job ID: {{ job.job_id }}</div>
+    </div>
+    
+    <!-- Result Statistics -->
+    <div class="result-stats">
+        <div class="stat-item">
+            <strong>Status</strong>
+            <div class="stat-value">{{ job.status|title }}</div>
+        </div>
+        <div class="stat-item">
+            <strong>Characters</strong>
+            <div class="stat-value">{{ text|length|default(0) }}</div>
+        </div>
+        <div class="stat-item">
+            <strong>Words</strong>
+            <div class="stat-value">{{ text.split()|length|default(0) }}</div>
+        </div>
+        <div class="stat-item">
+            <strong>Lines</strong>
+            <div class="stat-value">{{ text.split('\n')|length|default(0) }}</div>
+        </div>
+    </div>
+
+    <!-- Full Result Content -->
+    <div class="result-content" id="resultContent">{{ text|default("No text extracted") }}</div>
+
+    <!-- Actions -->
+    <div class="actions">
+        <button onclick="copyToClipboard()" class="copy-button" id="copyButton">
+            📋 Copy to Clipboard
+        </button>
+        <a href="/api/v1/jobs/{{ job.job_id }}/download" class="download-button">
+            💾 Download as Text
+        </a>
+        <a href="/job/{{ job.job_id }}" class="btn-secondary">
+            ← Back to Job Status
+        </a>
+        <a href="/" class="btn-primary">
+            🏠 New Upload
+        </a>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+// Copy to clipboard functionality
+async function copyToClipboard() {
+    const button = document.getElementById('copyButton');
+    const content = document.getElementById('resultContent').textContent;
+    
+    try {
+        await navigator.clipboard.writeText(content);
+        
+        // Visual feedback
+        const originalText = button.textContent;
+        button.textContent = '✅ Copied!';
+        button.classList.add('copy-success');
+        
+        setTimeout(() => {
+            button.textContent = originalText;
+            button.classList.remove('copy-success');
+        }, 2000);
+        
+    } catch (err) {
+        // Fallback for older browsers
+        const textArea = document.createElement('textarea');
+        textArea.value = content;
+        textArea.style.position = 'fixed';
+        textArea.style.left = '-999999px';
+        textArea.style.top = '-999999px';
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        
+        try {
+            document.execCommand('copy');
+            button.textContent = '✅ Copied!';
+            button.classList.add('copy-success');
+            
+            setTimeout(() => {
+                button.textContent = '📋 Copy to Clipboard';
+                button.classList.remove('copy-success');
+            }, 2000);
+        } catch (err) {
+            console.error('Failed to copy text: ', err);
+            button.textContent = '❌ Copy Failed';
+            setTimeout(() => {
+                button.textContent = '📋 Copy to Clipboard';
+            }, 2000);
+        } finally {
+            document.body.removeChild(textArea);
+        }
+    }
+}
+
+// Keyboard shortcut for copy (Ctrl+C or Cmd+C)
+document.addEventListener('keydown', function(e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'c' && !window.getSelection().toString()) {
+        e.preventDefault();
+        copyToClipboard();
+    }
+});
+</script>
+{% endblock %}

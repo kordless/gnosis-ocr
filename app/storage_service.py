@@ -1,292 +1,408 @@
-"""Storage service for managing sessions and files"""
+"""
+Storage Service V2 - Unified storage layer for local and cloud environments
+Inspired by gnosis-wraith storage architecture with user partitioning
+"""
 import os
+import hashlib
+import asyncio
 import json
 import shutil
-import asyncio
-from datetime import datetime, timedelta
+from typing import Optional, Dict, List, Union, BinaryIO
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any, List
-from uuid import uuid4
-import aiofiles
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import structlog
+import logging
 
-from app.config import settings, get_storage_path, get_session_file_path
-from app.models import ProcessingStatus
+try:
+    from google.cloud import storage as gcs
+    from google.cloud.exceptions import NotFound
+    HAS_GCS = True
+except ImportError:
+    HAS_GCS = False
 
-logger = structlog.get_logger()
+logger = logging.getLogger(__name__)
+
+
+def is_running_in_cloud() -> bool:
+    """Detect Google Cloud environment"""
+    return os.environ.get('RUNNING_IN_CLOUD', '').lower() == 'true'
+
+
+def get_storage_config() -> Dict[str, str]:
+    """Get current storage configuration"""
+    return {
+        'file_storage': 'gcs',
+        'gcs_bucket': os.environ.get('GCS_BUCKET_NAME', 'gnosis-ocr-storage'),
+        'model_bucket': os.environ.get('MODEL_BUCKET_NAME', 'gnosis-ocr-models')
+    }
+
 
 
 class StorageService:
-    """Manages file storage and session lifecycle"""
+    """Unified storage service for local and cloud environments"""
     
-    def __init__(self):
-        self.scheduler = AsyncIOScheduler()
-        self.sessions: Dict[str, Dict[str, Any]] = {}
-        self._ensure_storage_directory()
+    def __init__(self, user_email: Optional[str] = None):
+        """
+        Initialize storage service with optional user context
         
-    def _ensure_storage_directory(self):
-        """Ensure storage directory exists"""
-        Path(settings.storage_path).mkdir(parents=True, exist_ok=True)
+        Args:
+            user_email: User email for partitioning (defaults to anonymous)
+        """
+        self.config = get_storage_config()
+        self._user_email = user_email or "anonymous@gnosis-ocr.local"
+        self._user_hash = self._compute_user_hash(self._user_email)
+        self._is_cloud = is_running_in_cloud()
         
-    async def start(self):
-        """Start the storage service and cleanup scheduler"""
-        # Schedule cleanup job
-        self.scheduler.add_job(
-            self.cleanup_old_sessions,
-            'interval',
-            seconds=settings.cleanup_interval,
-            id='cleanup_sessions'
-        )
-        self.scheduler.start()
-        logger.info("Storage service started", cleanup_interval=settings.cleanup_interval)
-        
-    async def stop(self):
-        """Stop the storage service"""
-        if self.scheduler.running:
-            self.scheduler.shutdown()
-        logger.info("Storage service stopped")
-        
-    def create_session(self) -> str:
-        """Create a new session and return its hash"""
-        session_hash = str(uuid4())
-        session_path = get_storage_path(session_hash)
-        
-        # Create session directories
-        for subdir in ['input', 'images', 'output']:
-            Path(os.path.join(session_path, subdir)).mkdir(parents=True, exist_ok=True)
+        # Initialize storage backend
+        if self._is_cloud:
+            if not HAS_GCS:
+                raise RuntimeError("Google Cloud Storage client not installed")
+            self._init_gcs()
+        else:
+            self._init_local()
             
-        # Initialize session metadata
-        metadata = {
-            'session_hash': session_hash,
-            'created_at': datetime.utcnow().isoformat(),
-            'status': ProcessingStatus.PENDING.value,
-            'progress': 0.0,
-            'total_pages': 0,
-            'current_page': 0,
-            'message': 'Session created'
-        }
+        # Initialize cache paths
+        self._cache_path = self._get_cache_path()
         
-        # Save initial status
-        self._save_status(session_hash, metadata)
-        self.sessions[session_hash] = metadata
+        logger.info(f"StorageService initialized - Cloud: {self._is_cloud}, User: {self._user_hash}")
+    
+    def force_cloud_mode(self):
+        """Force storage service to use cloud mode (for Cloud Run deployments)
         
-        logger.info("Session created", session_hash=session_hash)
-        return session_hash
+        Deprecated: Storage service now always uses GCS
+        """
+        logger.debug("force_cloud_mode called but storage always uses GCS now")
+    
+    def _compute_user_hash(self, email: str) -> str:
+        """Compute 12-char hash for user bucketing"""
+        return hashlib.sha256(email.encode()).hexdigest()[:12]
+    
+    def _init_gcs(self):
+        """Initialize Google Cloud Storage client"""
+        if not HAS_GCS:
+            raise RuntimeError("Google Cloud Storage client not installed. Install with: pip install google-cloud-storage")
         
-    async def save_uploaded_file(self, session_hash: str, filename: str, content: bytes) -> Dict[str, Any]:
-        """Save uploaded file to session storage"""
-        if not self.validate_session(session_hash):
-            raise ValueError(f"Invalid session: {session_hash}")
-            
-        # Save file
-        file_path = get_session_file_path(session_hash, filename, 'input')
-        async with aiofiles.open(file_path, 'wb') as f:
-            await f.write(content)
-            
-        # Update session metadata
-        metadata = {
-            'filename': filename,
-            'file_size': len(content),
-            'uploaded_at': datetime.utcnow().isoformat()
-        }
+        from google.cloud import storage as gcs_module
+        self._gcs_client = gcs_module.Client()
+        self._bucket = self._gcs_client.bucket(self.config['gcs_bucket'])
         
-        self.update_session_metadata(session_hash, metadata)
-        logger.info("File saved", session_hash=session_hash, filename=filename, size=len(content))
-        
+        # Verify bucket exists
+        if not self._bucket.exists():
+            raise RuntimeError(f"GCS bucket {self.config['gcs_bucket']} does not exist")
+    
+    def _init_local(self):
+        """Initialize local storage (deprecated - always use GCS)"""
+        logger.warning("Local storage mode deprecated - should use GCS")
+        if not HAS_GCS:
+            raise RuntimeError("GCS not available and local storage is deprecated. Install google-cloud-storage: pip install google-cloud-storage")
+        # Force GCS mode instead
+        self._init_gcs()
+
+    
+    def _get_cache_path(self) -> str:
+        """Get cache path (deprecated - cache now handled by container)"""
+        return "/app/cache"
+    
+    async def get_cache_info(self) -> Dict[str, Union[str, int, bool]]:
+        """Get cache information (deprecated - cache now handled by container)"""
         return {
-            'file_path': file_path,
-            'file_size': len(content)
+            "message": "Cache handled by container - model cache at /app/cache",
+            "cache_path": "/app/cache",
+            "available": True
         }
+
+
+
         
-    def validate_session(self, session_hash: str) -> bool:
-        """Check if session exists and is valid"""
-        session_path = get_storage_path(session_hash)
-        return os.path.exists(session_path)
+    
+    
+    
+    def get_user_path(self) -> str:
+        """Get user-specific storage path: users/{hash}"""
+        return f"users/{self._user_hash}"
+    
+    def get_session_path(self, session_hash: str) -> str:
+        """Get full session path: users/{hash}/{session}"""
+        return f"{self.get_user_path()}/{session_hash}"
+    
+    def get_session_file_path(self, session_hash: str, filename: str, 
+                            subfolder: Optional[str] = None) -> str:
+        """Get full path for a file within a session"""
+        session_path = self.get_session_path(session_hash)
+        if subfolder:
+            return f"{session_path}/{subfolder}/{filename}"
+        return f"{session_path}/{filename}"
+    
+    # Core file operations
+    async def save_file(self, content: Union[bytes, str], filename: str, 
+                       session_hash: Optional[str] = None) -> str:
+        """
+        Save file to storage
         
-    def get_session_status(self, session_hash: str) -> Optional[Dict[str, Any]]:
-        """Get current session status"""
-        if session_hash in self.sessions:
-            return self.sessions[session_hash]
+        Args:
+            content: File content (bytes or string)
+            filename: Name of file
+            session_hash: Optional session context
             
-        status_file = get_session_file_path(session_hash, 'status.json')
-        if os.path.exists(status_file):
-            with open(status_file, 'r') as f:
-                status = json.load(f)
-                self.sessions[session_hash] = status
-                return status
-                
-        return None
+        Returns:
+            Path where file was saved
+        """
+        if isinstance(content, str):
+            content = content.encode('utf-8')
         
-    def update_session_status(self, session_hash: str, status: ProcessingStatus, 
-                            progress: float = None, message: str = None, 
-                            current_page: int = None):
-        """Update session processing status"""
-        session_status = self.get_session_status(session_hash)
-        if not session_status:
-            return
-            
-        session_status['status'] = status.value
-        if progress is not None:
-            session_status['progress'] = progress
-        if message is not None:
-            session_status['message'] = message
-        if current_page is not None:
-            session_status['current_page'] = current_page
-            
-        if status == ProcessingStatus.PROCESSING and 'started_at' not in session_status:
-            session_status['started_at'] = datetime.utcnow().isoformat()
-        elif status in [ProcessingStatus.COMPLETED, ProcessingStatus.FAILED]:
-            session_status['completed_at'] = datetime.utcnow().isoformat()
-            if 'started_at' in session_status:
-                started = datetime.fromisoformat(session_status['started_at'])
-                completed = datetime.fromisoformat(session_status['completed_at'])
-                session_status['processing_time'] = (completed - started).total_seconds()
-                
-        self._save_status(session_hash, session_status)
-        self.sessions[session_hash] = session_status
+        if session_hash:
+            file_path = self.get_session_file_path(session_hash, filename)
+        else:
+            file_path = f"{self.get_user_path()}/{filename}"
         
-    def update_session_metadata(self, session_hash: str, metadata: Dict[str, Any]):
-        """Update session metadata"""
-        session_status = self.get_session_status(session_hash)
-        if session_status:
-            session_status.update(metadata)
-            self._save_status(session_hash, session_status)
-            self.sessions[session_hash] = session_status
+        blob = self._bucket.blob(file_path)
+        blob.upload_from_string(content)
+        logger.info(f"Saved file to GCS: {file_path}")
+        
+        # Force consistency check for critical files
+        if filename in ['metadata.json', 'status.json']:
+            # Verify the file was written
+            if not blob.exists():
+                logger.warning(f"GCS consistency issue - file not immediately available: {file_path}")
+            else:
+                logger.debug(f"GCS file verified: {file_path}, size: {blob.size} bytes")
+
+        
+        return file_path
+    
+    async def get_file(self, filename: str, session_hash: Optional[str] = None) -> bytes:
+        """
+        Retrieve file from storage
+        
+        Args:
+            filename: Name of file
+            session_hash: Optional session context
             
-    def _save_status(self, session_hash: str, status: Dict[str, Any]):
-        """Save status to file"""
-        status_file = get_session_file_path(session_hash, 'status.json')
-        with open(status_file, 'w') as f:
-            json.dump(status, f, indent=2)
+        Returns:
+            File content as bytes
             
-    async def save_page_image(self, session_hash: str, page_num: int, image_data: bytes) -> str:
-        """Save extracted page image"""
+        Raises:
+            FileNotFoundError: If file doesn't exist
+        """
+        if session_hash:
+            file_path = self.get_session_file_path(session_hash, filename)
+        else:
+            file_path = f"{self.get_user_path()}/{filename}"
+        
+        blob = self._bucket.blob(file_path)
+        exists = blob.exists()
+        logger.debug("GCS file check",
+                   file_path=file_path,
+                   exists=exists,
+                   bucket=self._bucket.name)
+        if not exists:
+            raise FileNotFoundError(f"File not found: {file_path}")
+        return blob.download_as_bytes()
+
+    
+    async def delete_file(self, filename: str, session_hash: Optional[str] = None) -> bool:
+        """
+        Delete file from storage
+        
+        Args:
+            filename: Name of file
+            session_hash: Optional session context
+            
+        Returns:
+            True if file was deleted, False if it didn't exist
+        """
+        if session_hash:
+            file_path = self.get_session_file_path(session_hash, filename)
+        else:
+            file_path = f"{self.get_user_path()}/{filename}"
+        
+        blob = self._bucket.blob(file_path)
+        if blob.exists():
+            blob.delete()
+            logger.info(f"Deleted file from GCS: {file_path}")
+            return True
+        return False
+
+    
+    async def list_files(self, prefix: Optional[str] = None, 
+                        session_hash: Optional[str] = None) -> List[Dict[str, Union[str, int]]]:
+        """
+        List files in storage
+        
+        Args:
+            prefix: Optional prefix to filter files
+            session_hash: Optional session context
+            
+        Returns:
+            List of file metadata dicts with 'name', 'size', 'modified' keys
+        """
+        if session_hash:
+            search_prefix = self.get_session_path(session_hash)
+        else:
+            search_prefix = self.get_user_path()
+        
+        if prefix:
+            search_prefix = f"{search_prefix}/{prefix}"
+        
+        files = []
+        
+        blobs = self._bucket.list_blobs(prefix=search_prefix)
+        for blob in blobs:
+            files.append({
+                'name': blob.name.replace(search_prefix + '/', ''),
+                'size': blob.size,
+                'modified': blob.updated.isoformat() if blob.updated else None
+            })
+        
+        return files
+
+    
+    def get_file_url(self, filename: str, session_hash: Optional[str] = None) -> str:
+        """
+        Get URL for accessing a file
+        
+        Args:
+            filename: Name of file
+            session_hash: Optional session context
+            
+        Returns:
+            URL for accessing the file
+        """
+        if session_hash:
+            return f"/storage/{self._user_hash}/{session_hash}/{filename}"
+        return f"/storage/{self._user_hash}/{filename}"
+    
+    # OCR-specific methods
+    async def save_page_image(self, session_hash: str, page_num: int, 
+                            image_bytes: bytes) -> Dict[str, str]:
+        """Save OCR page image"""
         filename = f"page_{page_num:03d}.png"
-        file_path = get_session_file_path(session_hash, filename, 'images')
-        
-        async with aiofiles.open(file_path, 'wb') as f:
-            await f.write(image_data)
-            
-        return file_path
-        
-    async def save_page_result(self, session_hash: str, page_num: int, text: str) -> str:
-        """Save OCR result for a page"""
-        filename = f"page_{page_num:03d}.md"
-        file_path = get_session_file_path(session_hash, filename, 'output')
-        
-        async with aiofiles.open(file_path, 'w', encoding='utf-8') as f:
-            await f.write(text)
-            
-        return file_path
-        
-    async def save_combined_result(self, session_hash: str, combined_text: str) -> str:
+        path = await self.save_file(image_bytes, filename, session_hash)
+        return {
+            'page_num': page_num,
+            'filename': filename,
+            'path': path,
+            'url': self.get_file_url(filename, session_hash)
+        }
+    
+    async def save_page_result(self, session_hash: str, page_num: int, 
+                             text: str) -> Dict[str, str]:
+        """Save OCR page result"""
+        filename = f"page_{page_num:03d}_result.txt"
+        path = await self.save_file(text, filename, session_hash)
+        return {
+            'page_num': page_num,
+            'filename': filename,
+            'path': path,
+            'url': self.get_file_url(filename, session_hash)
+        }
+    
+    async def save_combined_result(self, session_hash: str, markdown: str) -> Dict[str, str]:
         """Save combined OCR result"""
-        file_path = get_session_file_path(session_hash, 'combined_output.md', 'output')
-        
-        async with aiofiles.open(file_path, 'w', encoding='utf-8') as f:
-            await f.write(combined_text)
-            
-        return file_path
-        
-    async def get_page_image(self, session_hash: str, page_num: int) -> Optional[bytes]:
-        """Get page image data"""
-        filename = f"page_{page_num:03d}.png"
-        file_path = get_session_file_path(session_hash, filename, 'images')
-        
-        if os.path.exists(file_path):
-            async with aiofiles.open(file_path, 'rb') as f:
-                return await f.read()
-        return None
-        
-    async def get_results(self, session_hash: str) -> Dict[str, Any]:
-        """Get all results for a session"""
-        output_dir = get_session_file_path(session_hash, '', 'output')
-        results = {
-            'pages': [],
-            'combined_markdown': None,
-            'metadata': {}
+        filename = "combined_output.md"
+        path = await self.save_file(markdown, filename, session_hash)
+        return {
+            'filename': filename,
+            'path': path,
+            'url': self.get_file_url(filename, session_hash)
         }
+    
+    async def save_session_metadata(self, session_hash: str, metadata: Dict) -> str:
+        """Save session metadata"""
+        filename = "metadata.json"
+        content = json.dumps(metadata, indent=2)
+        return await self.save_file(content, filename, session_hash)
+    
+    # Session management
+    async def create_session(self, initial_metadata: Optional[Dict] = None) -> str:
+        """
+        Create new session with user context
         
-        # Read page results
-        for file in sorted(Path(output_dir).glob('page_*.md')):
-            page_num = int(file.stem.split('_')[1])
-            async with aiofiles.open(file, 'r', encoding='utf-8') as f:
-                text = await f.read()
-                results['pages'].append({
-                    'page_number': page_num,
-                    'text': text,
-                    'filename': file.name
-                })
-                
-        # Read combined result
-        combined_file = get_session_file_path(session_hash, 'combined_output.md', 'output')
-        if os.path.exists(combined_file):
-            async with aiofiles.open(combined_file, 'r', encoding='utf-8') as f:
-                results['combined_markdown'] = await f.read()
-                
-        # Read metadata
-        metadata_file = get_session_file_path(session_hash, 'metadata.json', 'output')
-        if os.path.exists(metadata_file):
-            with open(metadata_file, 'r') as f:
-                results['metadata'] = json.load(f)
-                
-        return results
+        Returns:
+            Session hash/ID
+        """
+        import uuid
+        session_hash = str(uuid.uuid4())
         
-    def get_active_sessions(self) -> List[str]:
-        """Get list of active session hashes"""
-        active_sessions = []
-        for session_dir in Path(settings.storage_path).iterdir():
-            if session_dir.is_dir():
-                status = self.get_session_status(session_dir.name)
-                if status and status.get('status') in [ProcessingStatus.PENDING.value, 
-                                                      ProcessingStatus.PROCESSING.value]:
-                    active_sessions.append(session_dir.name)
-        return active_sessions
+        logger.info("Creating session", 
+                   session_hash=session_hash,
+                   user_email=self._user_email,
+                   user_hash=self._user_hash,
+                   is_cloud=self._is_cloud)
         
-    async def cleanup_old_sessions(self):
-        """Remove sessions older than timeout"""
-        try:
-            cutoff_time = datetime.utcnow() - timedelta(seconds=settings.session_timeout)
-            removed_count = 0
-            
-            for session_dir in Path(settings.storage_path).iterdir():
-                if not session_dir.is_dir():
+        # Create session metadata
+        metadata = {
+            'session_id': session_hash,
+            'user_email': self._user_email,
+            'user_hash': self._user_hash,
+            'created_at': datetime.utcnow().isoformat(),
+            'status': 'created'
+        }
+        if initial_metadata:
+            metadata.update(initial_metadata)
+        
+        # Save metadata
+        await self.save_session_metadata(session_hash, metadata)
+        
+        logger.info("Session created successfully", 
+                   session_hash=session_hash,
+                   session_path=self.get_session_path(session_hash))
+        
+        return session_hash
+    
+    async def validate_session(self, session_hash: str) -> bool:
+        """Check if session exists and belongs to current user with retry for GCS eventual consistency"""
+        import asyncio
+        
+        logger.debug("Starting session validation",
+                    session_hash=session_hash,
+                    user_hash=self._user_hash,
+                    user_email=self._user_email)
+        
+        # Retry logic for GCS eventual consistency
+        max_retries = 5
+        base_delay = 0.5  # Start with 500ms
+        
+        for attempt in range(max_retries):
+            try:
+                metadata_content = await self.get_file("metadata.json", session_hash)
+                metadata = json.loads(metadata_content)
+                stored_user_hash = metadata.get('user_hash')
+                
+                logger.debug("Session metadata found",
+                           session_hash=session_hash,
+                           stored_user_hash=stored_user_hash,
+                           current_user_hash=self._user_hash,
+                           stored_email=metadata.get('user_email'),
+                           current_email=self._user_email,
+                           match=stored_user_hash == self._user_hash)
+                
+                return stored_user_hash == self._user_hash
+            except FileNotFoundError:
+                if attempt < max_retries - 1:  # Don't wait on last attempt
+                    delay = base_delay * (2 ** attempt)  # Exponential backoff
+                    logger.debug(f"Session validation retry {attempt + 1}, waiting {delay}s", 
+                               session_hash=session_hash, attempt=attempt + 1)
+                    await asyncio.sleep(delay)
                     continue
-                    
-                session_hash = session_dir.name
-                status = self.get_session_status(session_hash)
                 
-                if status:
-                    created_at = datetime.fromisoformat(status.get('created_at', ''))
-                    if created_at < cutoff_time:
-                        shutil.rmtree(session_dir)
-                        if session_hash in self.sessions:
-                            del self.sessions[session_hash]
-                        removed_count += 1
-                        
-            if removed_count > 0:
-                logger.info("Cleaned up old sessions", count=removed_count)
-                
-        except Exception as e:
-            logger.error("Error during session cleanup", error=str(e))
-            
-    def create_download_archive(self, session_hash: str) -> Optional[str]:
-        """Create a ZIP archive of all session results"""
-        session_path = get_storage_path(session_hash)
-        archive_path = os.path.join(session_path, f"{session_hash}_results.zip")
+                logger.debug("Session not found after retries",
+                           session_hash=session_hash,
+                           attempts=max_retries)
+                return False
+
+    
+    async def delete_session(self, session_hash: str) -> bool:
+        """Delete entire session directory"""
+        if not await self.validate_session(session_hash):
+            return False
         
-        try:
-            shutil.make_archive(
-                archive_path.replace('.zip', ''),
-                'zip',
-                session_path
-            )
-            return archive_path
-        except Exception as e:
-            logger.error("Error creating archive", session_hash=session_hash, error=str(e))
-            return None
+        session_path = self.get_session_path(session_hash)
+        
+        # Delete all blobs with session prefix
+        blobs = list(self._bucket.list_blobs(prefix=session_path))
+        for blob in blobs:
+            blob.delete()
+        logger.info(f"Deleted session from GCS: {session_path}")
+        return True
 
-
-# Global storage service instance
-storage_service = StorageService()
+    

@@ -159,6 +159,8 @@ class HealthResponse(BaseModel):
     active_sessions: int = Field(..., description="Number of active sessions")
     
     class Config:
+        # Fix Pydantic warnings for model_loaded field
+        protected_namespaces = ()
         json_schema_extra = {
             "example": {
                 "status": "healthy",

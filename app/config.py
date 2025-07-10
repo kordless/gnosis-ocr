@@ -32,8 +32,14 @@ class Settings(BaseSettings):
     storage_path: str = Field(default="/tmp/ocr_sessions", env="STORAGE_PATH")
     cleanup_interval: int = Field(default=300, env="CLEANUP_INTERVAL")  # 5 minutes
     
+    # GCS Configuration for Cloud Run
+    running_in_cloud: bool = Field(default=False, env="RUNNING_IN_CLOUD")
+    gcs_bucket_name: str = Field(default="gnosis-ocr-storage", env="GCS_BUCKET_NAME")
+    model_bucket_name: str = Field(default="gnosis-ocr-models", env="MODEL_BUCKET_NAME")
+    
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
+
     
     # Redis (optional)
     redis_url: Optional[str] = Field(default=None, env="REDIS_URL")
@@ -54,6 +60,9 @@ class Settings(BaseSettings):
         env_file = ".env"
         env_file_encoding = "utf-8"
         case_sensitive = False
+        # Fix Pydantic warnings for model_* fields
+        protected_namespaces = ('settings_',)
+
 
 
 # Create global settings instance

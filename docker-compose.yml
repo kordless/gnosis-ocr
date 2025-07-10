@@ -2,34 +2,40 @@ version: '3.8'
 
 services:
   app:
+    image: gnosis-ocr:latest
     build:
       context: .
       dockerfile: Dockerfile
+    
     ports:
       - "7799:7799"
+
     environment:
       - PORT=7799
       - CUDA_VISIBLE_DEVICES=0
-      - MAX_FILE_SIZE=52428800
+      - MAX_FILE_SIZE=524288000  # 500MB with chunked streaming
       - SESSION_TIMEOUT=3600
       - LOG_LEVEL=INFO
       - MODEL_NAME=nanonets/Nanonets-OCR-s
       - STORAGE_PATH=/tmp/ocr_sessions
+      - HF_HOME=/app/cache
+      - MODEL_CACHE_PATH=/app/cache
+      - TRANSFORMERS_CACHE=/app/cache
+      - HF_DATASETS_CACHE=/app/cache
+      # Cloud environment variables (set if deploying to cloud)
+      # - RUNNING_IN_CLOUD=true
+      # - GCS_BUCKET_NAME=gnosis-ocr-storage
+      # - MODEL_BUCKET_NAME=gnosis-ocr-models
+
     volumes:
-      # Mount for development - hot reload
+      # Mount for development - hot reload (comment out for production)
       - ./app:/app/app
-      - ./static:/app/static
-      # Persistent storage for sessions (optional for local dev)
-      - ./data:/tmp/ocr_sessions
-      # Mount Hugging Face cache to avoid re-downloading models (7.4GB)
-      # This now includes both cache structures and all model commits
-      - ${HF_CACHE_HOST_PATH:-C:\Users\kord\.cache\huggingface}:/root/.cache/huggingface
+      # Use Docker volume instead of bind mount for sessions - fixes permissions!
+      - ocr_sessions_data:/tmp/ocr_sessions
+      # Mount model cache to avoid rebuilding with every code change
+      - ./model-cache:/app/cache
 
-
-
-
-
-
+    # Modern Docker Compose GPU support (Compose v3.8+)
     deploy:
       resources:
         reservations:
@@ -37,9 +43,17 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7799/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 120s  # Increased for model loading time
+
+    restart: unless-stopped
+
+volumes:
+  ocr_sessions_data:
+    driver: local
+

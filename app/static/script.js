@@ -26,6 +26,79 @@ const newUpload = document.getElementById('new-upload');
 const copyText = document.getElementById('copy-text');
 const errorRetry = document.getElementById('error-retry');
 
+// Model status tracking
+let modelReady = false;
+let checkingModel = false;
+
+// Check model status
+async function checkModelStatus() {
+    if (checkingModel) return;
+    checkingModel = true;
+    
+    try {
+        const response = await fetch('/health');
+        const health = await response.json();
+        
+        if (health.status === 'healthy' && health.model_loaded) {
+            modelReady = true;
+            updateUploadArea('ready');
+        } else if (health.status === 'starting' || !health.model_loaded) {
+            modelReady = false;
+            updateUploadArea('loading');
+            // Check again in 2 seconds
+            setTimeout(checkModelStatus, 2000);
+        } else {
+            modelReady = false;
+            updateUploadArea('failed');
+        }
+    } catch (error) {
+        modelReady = false;
+        updateUploadArea('error');
+    } finally {
+        checkingModel = false;
+    }
+}
+
+// Update upload area based on model status
+function updateUploadArea(status) {
+    const uploadArea = document.getElementById('upload-area');
+    const h2 = uploadArea.querySelector('h2');
+    const p = uploadArea.querySelector('p');
+    const button = uploadArea.querySelector('button');
+    
+    switch (status) {
+        case 'loading':
+            h2.textContent = 'Loading OCR Model...';
+            p.textContent = 'You can upload files - they will be queued until ready';
+            button.disabled = false;
+            button.textContent = 'Upload (Will Queue)';
+            uploadArea.style.opacity = '0.8';
+            break;
+        case 'ready':
+            h2.textContent = 'Drop PDF file here or click to browse';
+            p.textContent = 'Maximum file size: 50MB';
+            button.disabled = false;
+            button.textContent = 'Browse Files';
+            uploadArea.style.opacity = '1';
+            break;
+        case 'failed':
+            h2.textContent = 'OCR Model Failed to Load';
+            p.textContent = 'Please refresh the page to try again';
+            button.disabled = true;
+            button.textContent = 'Model Failed';
+            uploadArea.style.opacity = '0.6';
+            break;
+        case 'error':
+            h2.textContent = 'Connection Error';
+            p.textContent = 'Unable to check model status';
+            button.disabled = true;
+            button.textContent = 'Connection Error';
+            uploadArea.style.opacity = '0.6';
+            break;
+    }
+}
+
+
 // State
 let currentSession = null;
 let ocrResults = null;
@@ -41,12 +114,23 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // Event Listeners
 function setupEventListeners() {
+    // Model loading is automatic in background
+    // No manual load model button needed
+    
     // File upload
-    browseBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        fileInput.click();
-    });
-    fileInput.addEventListener('change', handleFileSelect);
+    if (browseBtn) {
+        browseBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            console.log('Browse button clicked');
+            fileInput.click();
+        });
+    } else {
+        console.error('Browse button not found');
+    }
+    if (fileInput) {
+        fileInput.addEventListener('change', handleFileSelect);
+    }
+
     
     // Drag and drop
     uploadArea.addEventListener('dragover', handleDragOver);
@@ -123,47 +207,40 @@ async function uploadFile(file) {
     showSection('progress');
     updateProgress(0, 'Preparing upload...');
     
-    // Use chunked upload for large files (>10MB) or if user prefers
-    const useChunkedUpload = file.size > 10 * 1024 * 1024; // 10MB threshold
-    
-    if (useChunkedUpload) {
-        await uploadFileChunked(file);
-    } else {
-        await uploadFileNormal(file);
-    }
+    // For job-based system, always use normal upload
+    // Large files are handled by job queuing
+    await uploadFileNormal(file);
 }
 
-// Normal upload for small files
+// Job-based upload - submit job and redirect to job page
 async function uploadFileNormal(file) {
     const formData = new FormData();
     formData.append('file', file);
     
     try {
-        updateProgress(10, 'Uploading document...');
+        updateProgress(10, 'Submitting job...');
         
-        const response = await fetch('/upload', {
+        const response = await fetch('/api/v1/jobs/submit', {
             method: 'POST',
             body: formData
         });
         
         if (!response.ok) {
             const error = await response.json();
-            throw new Error(error.message || 'Upload failed');
+            throw new Error(error.detail || error.message || 'Job submission failed');
         }
         
         const data = await response.json();
-        currentSession = data.session_hash;
+        const jobId = data.job_id;
         
-        logInfo('Upload successful', {
-            session: currentSession,
-            filename: data.filename,
-            file_size: data.file_size
+        logInfo('Job submitted successfully', {
+            job_id: jobId,
+            status: data.status,
+            status_url: data.status_url
         });
         
-        logStatus(currentSession, 'session_created', data);
-        
-        // Start status checking
-        startStatusChecking();
+        // Redirect to job status page
+        window.location.href = `/job/${jobId}`;
         
     } catch (error) {
         showError(error.message);
@@ -370,18 +447,25 @@ async function checkStatus() {
         return;
     }
     
-    logDebug('Checking status', { session: currentSession });
+    // Only log every 10th check to reduce noise (every 10 seconds instead of every second)
+    if (statusCheckFailureCount === 0 || Math.floor(Date.now() / 1000) % 10 === 0) {
+        logDebug('Checking status', { session: currentSession });
+    }
     
     try {
         const response = await fetch(`/status/${currentSession}`, {
             timeout: 10000 // 10 second timeout
         });
         
-        logStatus(currentSession, 'status_check', {
-            status: response.status,
-            ok: response.ok,
-            url: response.url
-        });
+        // Only log status checks on errors or every 10th check
+        if (!response.ok || Math.floor(Date.now() / 1000) % 10 === 0) {
+            logStatus(currentSession, 'status_check', {
+                status: response.status,
+                ok: response.ok,
+                url: response.url
+            });
+        }
+
         
         if (!response.ok) {
             const errorText = await response.text();
@@ -657,6 +741,7 @@ function resetToUpload() {
     showSection('upload');
 }
 
+
 // Logging Functions (placeholders - replace with actual logging implementation)
 function logInfo(message, context = {}) {
     console.log('[INFO]', message, context);
@@ -673,3 +758,12 @@ function logDebug(message, context = {}) {
 function logStatus(session, event, data = {}) {
     console.log('[STATUS]', session, event, data);
 }
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    // Check model status immediately
+    checkModelStatus();
+    
+    // Job system allows uploads even when model is loading
+    // Jobs are queued until model is ready
+});

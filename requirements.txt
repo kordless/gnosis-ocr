@@ -5,13 +5,13 @@ python-multipart==0.0.6
 aiofiles==23.2.1
 
 # OCR Model dependencies
-transformers>=4.46.0
-torch==2.1.2
-torchvision==0.16.2
-accelerate>=0.26.1
+# Use the exact same transformers version as vLLM to avoid conflicts
+transformers>=4.48.0
+accelerate>=0.21.0
 pillow>=10.2.0
 numpy<2.0
 qwen-vl-utils>=0.0.5
+
 
 # PDF processing
 PyMuPDF==1.23.21
@@ -25,7 +25,7 @@ pydantic==2.5.3
 pydantic-settings==2.1.0
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
-typing-extensions==4.9.0
+typing-extensions>=4.12.0
 
 # Background tasks and scheduling
 apscheduler==3.10.4
@@ -39,5 +39,5 @@ pytest==7.4.4
 pytest-asyncio==0.23.3
 httpx==0.26.0
 
-# Optional: Cloud storage (for future GCS integration)
-# google-cloud-storage==2.14.0
+# Cloud storage - required for storage service
+google-cloud-storage==2.14.0
