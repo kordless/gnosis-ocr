@@ -365,13 +365,13 @@ switch ($Target) {
                 } else {
                     Write-Error "Failed to start services with docker-compose"
                 }
-                
-                finally {
-                    Pop-Location
-                }
-            } else {
-                Write-Host "[WOULD RUN] docker-compose up -d" -ForegroundColor Magenta
+            } finally {
+                Pop-Location
             }
+        } else {
+            Write-Host "[WOULD RUN] docker-compose up -d" -ForegroundColor Magenta
+        }
+
         }
 
     }
