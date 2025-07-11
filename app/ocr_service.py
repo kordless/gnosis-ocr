@@ -533,9 +533,12 @@ class OCRService:
         except Exception as e:
             logger.error("Error during OCR service cleanup", error=str(e), exc_info=True)
 
-    def submit_job(self, image_data, job_type="image"):
+    def submit_job(self, image_data, job_type="image", user_email=None):
         """Submit OCR job, return job ID immediately"""
         from datetime import datetime
+        # Import here to avoid circular imports
+        from app.storage_service import StorageService
+
         
         job_id = str(uuid.uuid4())
         
@@ -544,6 +547,7 @@ class OCRService:
             "status": "queued",
             "type": job_type,
             "data": image_data,
+            "user_email": user_email,  # Store user context
             "created": datetime.utcnow().isoformat(),
             "result": None,
             "error": None,
@@ -555,8 +559,59 @@ class OCRService:
                 "percent": 0
             }
         }
+
         
         self.jobs[job_id] = job_data
+        
+        # CRITICAL FIX: Persist job to GCS immediately
+        try:
+            # Create storage service with user context
+            storage_service = StorageService(user_email=user_email)
+
+            if os.environ.get('RUNNING_IN_CLOUD') == 'true':
+                storage_service.force_cloud_mode()
+            
+            # Save job metadata to GCS using job_id as session_hash
+            import asyncio
+            import json
+            
+            job_metadata = {
+                'job_id': job_id,
+                'job_type': job_type,
+                'status': 'queued',
+                'created_at': datetime.utcnow().isoformat(),
+                'file_size': len(image_data) if image_data else 0
+            }
+            
+            # Create session and save metadata synchronously 
+            # (this runs in main thread, not ThreadPoolExecutor)
+            try:
+                loop = asyncio.get_event_loop()
+                session_task = loop.create_task(storage_service.create_session(job_metadata, session_hash=job_id))
+                
+                # Save initial status
+                status_data = {
+                    'status': 'queued',
+                    'progress': 0.0,
+                    'message': 'Job queued, waiting for model to be ready',
+                    'updated_at': datetime.utcnow().isoformat()
+                }
+                status_task = loop.create_task(storage_service.save_file(
+                    json.dumps(status_data, indent=2).encode('utf-8'),
+                    'status.json',
+                    job_id
+                ))
+            except RuntimeError:
+                # If no event loop in this thread, skip GCS persistence for now
+                logger.warning(f"No event loop available for job {job_id} GCS persistence")
+
+            
+            logger.info(f"✅ Job {job_id} persisted to GCS")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to persist job {job_id} to GCS: {e}")
+            # Continue anyway - job is still in memory
+
         
         if not self._model_loaded:
             if self._loading:
@@ -582,6 +637,10 @@ class OCRService:
                 job = self.jobs[job_id]
                 job['status'] = 'processing'
                 logger.info(f"🔄 Processing job {job_id}")
+                
+                # Update GCS with processing status
+                self._update_job_status_gcs(job_id, 'processing', 'Starting OCR processing...')
+
                 
                 file_data = job['data']
                 if job['type'] == "image":
@@ -638,6 +697,10 @@ class OCRService:
                 }
                 logger.info(f"✅ Job {job_id} completed successfully")
                 
+                # Update GCS with completion status
+                self._update_job_status_gcs(job_id, 'completed', 'Processing complete!')
+
+                
             except Exception as e:
                 job['status'] = 'failed'
                 job['error'] = str(e)
@@ -649,12 +712,131 @@ class OCRService:
                     "percent": 0
                 }
                 logger.error(f"❌ Job {job_id} failed: {e}")
+                
+                # Update GCS with error status
+                self._update_job_status_gcs(job_id, 'failed', f'Processing failed: {str(e)}')
+
         
         self.executor.submit(_process)
     
+    def _update_job_status_gcs(self, job_id, status, message):
+        """Helper method to update job status in GCS"""
+        try:
+            from app.storage_service import StorageService
+            from datetime import datetime
+            import asyncio
+            import json
+            
+            # Get job data to extract user context
+            job = self.jobs.get(job_id, {})
+            user_email = job.get('user_email')  # We'll need to store this in job data
+            
+            # Create storage service with user context
+            storage_service = StorageService(user_email=user_email)
+
+            if os.environ.get('RUNNING_IN_CLOUD') == 'true':
+                storage_service.force_cloud_mode()
+            
+            # Get current job data for progress info
+            job = self.jobs.get(job_id, {})
+            progress_data = job.get('progress', {})
+            
+            # Create status update
+            status_data = {
+                'status': status,
+                'progress': progress_data.get('percent', 0),
+                'current_page': progress_data.get('current_page', 0),
+                'total_pages': progress_data.get('total_pages', 0),
+                'message': message,
+                'updated_at': datetime.utcnow().isoformat()
+            }
+            
+            # Save to GCS synchronously from background thread
+            import asyncio
+            try:
+                # Create new event loop for this thread
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                # Run the save operation
+                loop.run_until_complete(storage_service.save_file(
+                    json.dumps(status_data, indent=2).encode('utf-8'),
+                    'status.json',
+                    job_id
+                ))
+            finally:
+                # Clean up the loop
+                try:
+                    loop.close()
+                except:
+                    pass
+
+            
+            logger.debug(f"📝 Updated job {job_id} status in GCS: {status}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to update job {job_id} status in GCS: {e}")
+    
     def get_job_status(self, job_id):
-        """Get job result by ID"""
-        return self.jobs.get(job_id, {"status": "not_found"})
+        """Get job result by ID - check memory first, then GCS"""
+        # First check in-memory jobs
+        if job_id in self.jobs:
+            return self.jobs[job_id]
+        
+        # If not in memory, try to load from GCS (container restart recovery)
+        try:
+            from app.storage_service import StorageService
+            import asyncio
+            import json
+            
+            # Try to load job status from GCS
+            storage_service = StorageService(user_email=None)  # Anonymous fallback
+            if os.environ.get('RUNNING_IN_CLOUD') == 'true':
+                storage_service.force_cloud_mode()
+            
+            # Try to get status file - create new event loop if needed
+            try:
+                # Try to get existing loop first
+                loop = asyncio.get_event_loop()
+                status_content = loop.run_until_complete(storage_service.get_file('status.json', job_id))
+            except RuntimeError:
+                # No event loop, create a new one
+                loop = asyncio.new_event_loop()
+                try:
+                    asyncio.set_event_loop(loop)
+                    status_content = loop.run_until_complete(storage_service.get_file('status.json', job_id))
+                finally:
+                    loop.close()
+
+            
+            if status_content:
+                status_data = json.loads(status_content.decode('utf-8'))
+                logger.info(f"🔄 Recovered job {job_id} status from GCS: {status_data.get('status')}")
+                
+                # Reconstruct basic job data
+                recovered_job = {
+                    "status": status_data.get('status', 'unknown'),
+                    "progress": {
+                        "current_step": status_data.get('status', 'unknown'),
+                        "message": status_data.get('message', 'Recovered from storage'),
+                        "current_page": status_data.get('current_page', 0),
+                        "total_pages": status_data.get('total_pages', 0),
+                        "percent": status_data.get('progress', 0)
+                    },
+                    "result": None,  # Result would need separate recovery
+                    "created": "unknown",
+                    "type": "unknown"
+                }
+                
+                return recovered_job
+                
+        except Exception as e:
+            logger.debug(f"Could not recover job {job_id} from GCS: {e}")
+        
+        # Not found anywhere
+        return {"status": "not_found"}
+
+
 
 # Global instance
 ocr_service = OCRService()

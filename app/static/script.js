@@ -256,7 +256,7 @@ async function uploadFileChunked(file) {
         updateProgress(0, `Preparing chunked upload (${totalChunks} chunks)...`);
         
         // Start upload session
-        const startResponse = await fetch('/upload/start', {
+        const startResponse = await fetch('/api/v1/jobs/submit/start', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -265,6 +265,7 @@ async function uploadFileChunked(file) {
                 total_chunks: totalChunks
             })
         });
+
         
         if (!startResponse.ok) {
             const error = await startResponse.json();
@@ -272,11 +273,12 @@ async function uploadFileChunked(file) {
         }
         
         const sessionData = await startResponse.json();
-        currentSession = sessionData.session_hash;
+        currentSession = sessionData.upload_id;
         currentUploadSession = sessionData;
         
-        // Setup WebSocket for real-time progress
+        // Setup WebSocket for real-time progress (using upload_id)
         setupProgressWebSocket(currentSession);
+
         
         logInfo('Chunked upload started', {
             session: currentSession,
@@ -286,6 +288,7 @@ async function uploadFileChunked(file) {
         });
         
         // Upload chunks
+        let jobId = null;
         for (let chunkNumber = 0; chunkNumber < totalChunks; chunkNumber++) {
             if (uploadPaused) {
                 // Wait for resume
@@ -296,17 +299,27 @@ async function uploadFileChunked(file) {
             const end = Math.min(start + CHUNK_SIZE, file.size);
             const chunk = file.slice(start, end);
             
-            await uploadChunk(currentSession, chunkNumber, chunk);
+            const chunkResult = await uploadChunk(currentSession, chunkNumber, chunk);
             
-            // Update progress (WebSocket will also update, but this ensures UI responsiveness)
+            // Check if upload is complete (last chunk)
+            if (chunkResult.upload_complete) {
+                jobId = chunkResult.job_id;
+                logInfo('Upload complete, job created', { session: currentSession, job_id: jobId });
+                updateProgress(100, 'Upload complete, processing...');
+                break;
+            }
+            
+            // Update progress for partial upload
             const progress = ((chunkNumber + 1) / totalChunks) * 100;
             updateProgress(progress, `Uploading chunk ${chunkNumber + 1} of ${totalChunks}...`);
         }
         
-        logInfo('All chunks uploaded', { session: currentSession });
-        updateProgress(100, 'Upload complete, processing...');
-        
-        // WebSocket will handle the transition to processing status
+        // If we have a job ID, start polling for job status instead of session status
+        if (jobId) {
+            currentSession = jobId; // Switch to using job ID for status checks
+            startJobStatusChecking(jobId);
+        }
+
         
     } catch (error) {
         logError('Chunked upload failed', { session: currentSession, error: error.message });
@@ -330,14 +343,17 @@ async function uploadChunk(sessionHash, chunkNumber, chunk) {
                 }
                 const base64 = btoa(binaryString);
                 
-                const response = await fetch(`/upload/chunk/${sessionHash}`, {
+                // Create form data for file upload (new endpoint expects file upload)
+                const formData = new FormData();
+                const chunkBlob = new Blob([uint8Array]);
+                formData.append('file', chunkBlob, `chunk_${chunkNumber}`);
+                
+                const response = await fetch(`/api/v1/jobs/submit/chunk/${sessionHash}`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        chunk_number: chunkNumber,
-                        content: base64
-                    })
+                    headers: { 'X-Chunk-Number': chunkNumber.toString() },
+                    body: formData
                 });
+
                 
                 if (!response.ok) {
                     const error = await response.json();
@@ -440,6 +456,71 @@ function startStatusChecking() {
     statusCheckFailureCount = 0;
     statusCheckInterval = setInterval(checkStatus, 1000);
 }
+
+// Job status checking for new job system
+function startJobStatusChecking(jobId) {
+    // Clear any existing interval first
+    if (statusCheckInterval) {
+        clearInterval(statusCheckInterval);
+    }
+    // Reset failure count
+    statusCheckFailureCount = 0;
+    statusCheckInterval = setInterval(() => checkJobStatus(jobId), 1000);
+}
+
+async function checkJobStatus(jobId) {
+    if (!jobId) return;
+    
+    try {
+        const response = await fetch(`/api/v1/jobs/status/${jobId}`);
+        
+        if (!response.ok) {
+            statusCheckFailureCount++;
+            if (statusCheckFailureCount >= MAX_STATUS_FAILURES) {
+                showError('Unable to check job status. Please refresh the page.');
+                clearInterval(statusCheckInterval);
+            }
+            return;
+        }
+        
+        // Reset failure count on successful response
+        statusCheckFailureCount = 0;
+        
+        const status = await response.json();
+        
+        if (status.status === 'completed') {
+            clearInterval(statusCheckInterval);
+            updateProgress(100, 'Processing complete!');
+            
+            // Show results
+            if (status.result) {
+                showResults(jobId, status.result);
+            }
+        } else if (status.status === 'failed') {
+            clearInterval(statusCheckInterval);
+            showError(`Processing failed: ${status.error || 'Unknown error'}`);
+        } else if (status.status === 'processing') {
+            // Update progress based on job progress
+            const progress = status.progress || {};
+            updateProgress(
+                progress.percent || 0, 
+                progress.message || 'Processing...',
+                progress.current_page,
+                progress.total_pages
+            );
+        }
+        
+    } catch (error) {
+        statusCheckFailureCount++;
+        logError('Status check failed', error);
+        
+        if (statusCheckFailureCount >= MAX_STATUS_FAILURES) {
+            showError('Unable to check job status. Please refresh the page.');
+            clearInterval(statusCheckInterval);
+        }
+    }
+}
+
 
 async function checkStatus() {
     if (!currentSession) {

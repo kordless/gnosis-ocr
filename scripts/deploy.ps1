@@ -336,48 +336,45 @@ switch ($Target) {
             Write-Host "Using compose file: $composeFilePath" -ForegroundColor Gray
             
             if (-not $WhatIf) {
-                & docker-compose up -d
-                if ($LASTEXITCODE -eq 0) {
-                    Write-Host "✓ Services started successfully" -ForegroundColor Green
-                    Write-Host "✓ Service available at: http://localhost:7799" -ForegroundColor Cyan
-                    Write-Host ""
-                    Write-Host "Useful commands:" -ForegroundColor Yellow
-                    Write-Host "  Check logs:    docker-compose logs -f" -ForegroundColor Gray
-                    Write-Host "  Check status:  docker-compose ps" -ForegroundColor Gray
-                    Write-Host "  Check GPU:     docker-compose exec app nvidia-smi" -ForegroundColor Gray
-                    Write-Host "  Enter shell:   docker-compose exec app /bin/bash" -ForegroundColor Gray
-                    Write-Host "  Stop services: docker-compose down" -ForegroundColor Gray
-                    Write-Host "  Restart:       docker-compose restart" -ForegroundColor Gray
-                    Write-Host ""
-                    Write-Host "Waiting for service to start..." -ForegroundColor White
-                    Start-Sleep -Seconds 5
-                    
-                    # Check if service is healthy
-                    try {
-                        $response = Invoke-WebRequest -Uri "http://localhost:7799/health" -UseBasicParsing -TimeoutSec 5
-                        if ($response.StatusCode -eq 200) {
-                            Write-Host "✓ Health check passed!" -ForegroundColor Green
+                Push-Location $projectRoot
+                try {
+                    & docker-compose up -d
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Host "✓ Services started successfully" -ForegroundColor Green
+                        Write-Host "✓ Service available at: http://localhost:7799" -ForegroundColor Cyan
+                        Write-Host ""
+                        Write-Host "Useful commands:" -ForegroundColor Yellow
+                        Write-Host "  Check logs:    docker-compose logs -f" -ForegroundColor Gray
+                        Write-Host "  Check status:  docker-compose ps" -ForegroundColor Gray
+                        Write-Host "  Check GPU:     docker-compose exec app nvidia-smi" -ForegroundColor Gray
+                        Write-Host "  Enter shell:   docker-compose exec app /bin/bash" -ForegroundColor Gray
+                        Write-Host "  Stop services: docker-compose down" -ForegroundColor Gray
+                        Write-Host "  Restart:       docker-compose restart" -ForegroundColor Gray
+                        Write-Host ""
+                        Write-Host "Waiting for service to start..." -ForegroundColor White
+                        Start-Sleep -Seconds 5
+                        
+                        # Check if service is healthy
+                        try {
+                            $response = Invoke-WebRequest -Uri "http://localhost:7799/health" -UseBasicParsing -TimeoutSec 5
+                            if ($response.StatusCode -eq 200) {
+                                Write-Host "✓ Health check passed!" -ForegroundColor Green
+                            }
+                        } catch {
+                            Write-Host "⚠ Health check failed - service may still be starting" -ForegroundColor Yellow
+                            Write-Host "  Check logs: docker-compose logs -f app" -ForegroundColor Gray
                         }
-                    } catch {
-                        Write-Host "⚠ Health check failed - service may still be starting" -ForegroundColor Yellow
-                        Write-Host "  Check logs: docker-compose logs -f app" -ForegroundColor Gray
+                    } else {
+                        Write-Error "Failed to start services with docker-compose"
                     }
-                } else {
-                    Write-Error "Failed to start services with docker-compose"
+                } finally {
+                    Pop-Location
                 }
-            } finally {
-                Pop-Location
+            } else {
+                Write-Host "[WOULD RUN] docker-compose up -d" -ForegroundColor Magenta
             }
-        } else {
-            Write-Host "[WOULD RUN] docker-compose up -d" -ForegroundColor Magenta
         }
-
-        }
-
     }
-
-
-    
     "staging" {
         Write-Host "Staging deployment" -ForegroundColor White
         
@@ -456,7 +453,6 @@ switch ($Target) {
                             "run", "deploy", "gnosis-ocr"
                             "--image", $gcrImage
                             "--region", "us-central1"
-
                             "--platform", "managed"
                             "--allow-unauthenticated"
                             "--memory", "16Gi"
@@ -465,26 +461,17 @@ switch ($Target) {
                             "--gpu-type", "nvidia-l4"
                             "--timeout", "3600"
                             "--concurrency", "1"
-                            "--min-instances", "0"
-                            "--max-instances", "3"
-
-
-
+                            "--min-instances", "1"
+                            "--max-instances", "2"
 
                             "--execution-environment", "gen2"
                             "--no-cpu-throttling"
                             "--port", "8080"
                             "--cpu-boost"
-
-
-
                             "--add-volume", "name=model-cache,type=cloud-storage,bucket=gnosis-ocr-models"
                             "--add-volume-mount", "volume=model-cache,mount-path=/app/cache"
                             "--set-env-vars", "RUNNING_IN_CLOUD=true,GCS_BUCKET_NAME=gnosis-ocr-storage,MODEL_BUCKET_NAME=gnosis-ocr-models,MODEL_CACHE_PATH=/app/cache,HF_HOME=/app/cache,TRANSFORMERS_CACHE=/app/cache,DEVICE=cuda,CUDA_VISIBLE_DEVICES=0,MAX_FILE_SIZE=104857600,SESSION_TIMEOUT=1800,LOG_LEVEL=INFO"
-
-
                             "--service-account", "949870462453-compute@developer.gserviceaccount.com"
-
                         )
                         
                         Write-Host "Running: gcloud $($deployArgs -join ' ')" -ForegroundColor Gray
@@ -613,8 +600,6 @@ switch ($Target) {
             Write-Host "  4. Deploy using gcloud run deploy (see commands above)" -ForegroundColor Gray
         }
     }
-
-    
     "lean" {
         Write-Host "Lean deployment - image built without models" -ForegroundColor White
         Write-Host "Requires model mounting at runtime" -ForegroundColor Yellow

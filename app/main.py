@@ -305,9 +305,16 @@ async def load_model(background_tasks: BackgroundTasks):
 
 
 @app.post("/api/v1/jobs/submit")
-async def submit_ocr_job(file: UploadFile = File(...)):
+async def submit_ocr_job(
+    request: Request,
+    file: UploadFile = File(...),
+    x_user_email: Optional[str] = Header(None)
+):
     """Submit OCR job for background processing, returns job ID immediately (docext pattern)"""
     try:
+        # Get user context
+        user_email = get_user_email_from_request(request, x_user_email)
+        
         # Basic file validation - support PDF and images
         allowed_types = ['application/pdf', 'image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/tiff']
         if not file.content_type or file.content_type not in allowed_types:
@@ -318,7 +325,8 @@ async def submit_ocr_job(file: UploadFile = File(...)):
         
         # Submit job with raw file data - determine type based on content type
         job_type = "pdf" if file.content_type == "application/pdf" else "image"
-        job_id = ocr_service.submit_job(image_data, job_type=job_type)
+        job_id = ocr_service.submit_job(image_data, job_type=job_type, user_email=user_email)
+
         
         # Get job status to return appropriate response
         job_status = ocr_service.get_job_status(job_id)
@@ -420,8 +428,10 @@ async def upload_job_chunk(upload_id: str, file: UploadFile = File(...)):
             filename = upload_session['filename']
             job_type = "pdf" if filename.lower().endswith('.pdf') else "image"
             
-            # Submit complete file to OCR job system
-            job_id = ocr_service.submit_job(complete_file_data, job_type=job_type)
+            # Submit complete file to OCR job system (get user_email from upload session)
+            user_email = upload_session.get('user_email')
+            job_id = ocr_service.submit_job(complete_file_data, job_type=job_type, user_email=user_email)
+
             
             # Clean up upload session
             del chunked_job_uploads[upload_id]
@@ -1865,6 +1875,7 @@ async def test_cache_mount():
         "cache_paths": {},
         "model_search": {}
     }
+
     
     # Check various cache paths
     paths_to_check = [
