@@ -26,7 +26,8 @@
       "mcp__gnosis-docker__docker_restart",
       "mcp__gnosis-docker__docker_images",
       "mcp__gnosis-conciousness__save_character_memory",
-      "mcp__gnosis-conciousness__character_generator"
+      "mcp__gnosis-conciousness__character_generator",
+      "mcp__notify-human__set_status_light"
     ],
     "deny": []
   }

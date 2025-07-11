@@ -190,7 +190,7 @@ function handleDrop(e) {
     }
 }
 
-// Upload File - Smart chunking based on file size
+// Upload File - Always use chunked upload for cloud compatibility
 async function uploadFile(file) {
     // Validate file
     if (file.type !== 'application/pdf') {
@@ -198,58 +198,19 @@ async function uploadFile(file) {
         return;
     }
     
-    if (file.size > 524288000) { // 500MB - leveraging chunked streaming architecture
-        showError('File size exceeds 500MB limit');
-        return;
-    }
-    
     // Show progress section
     showSection('progress');
     updateProgress(0, 'Preparing upload...');
     
-    // For job-based system, always use normal upload
-    // Large files are handled by job queuing
-    await uploadFileNormal(file);
+    // Always use chunked upload for Google Cloud Run compatibility
+    await uploadFileChunked(file);
 }
 
-// Job-based upload - submit job and redirect to job page
-async function uploadFileNormal(file) {
-    const formData = new FormData();
-    formData.append('file', file);
-    
-    try {
-        updateProgress(10, 'Submitting job...');
-        
-        const response = await fetch('/api/v1/jobs/submit', {
-            method: 'POST',
-            body: formData
-        });
-        
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.detail || error.message || 'Job submission failed');
-        }
-        
-        const data = await response.json();
-        const jobId = data.job_id;
-        
-        logInfo('Job submitted successfully', {
-            job_id: jobId,
-            status: data.status,
-            status_url: data.status_url
-        });
-        
-        // Redirect to job status page
-        window.location.href = `/job/${jobId}`;
-        
-    } catch (error) {
-        showError(error.message);
-    }
-}
+// Non-chunked upload removed - using only chunked upload for cloud compatibility
 
-// Chunked upload for large files
+// Chunked upload - now used for all files for cloud compatibility
 async function uploadFileChunked(file) {
-    const CHUNK_SIZE = 1024 * 1024; // 1MB chunks
+    const CHUNK_SIZE = 1024 * 1024; // 1MB chunks - optimal for Google Cloud Run
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
     
     try {

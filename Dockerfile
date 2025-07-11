@@ -44,10 +44,11 @@ RUN mkdir -p /app/cache && chown -R appuser:appuser /app/cache
 # Copy application code (includes static and templates)
 COPY --chown=appuser:appuser app/ ./app/
 
-# Create directories for OCR sessions with proper permissions
-RUN mkdir -p /tmp/ocr_sessions/users /tmp/ocr_sessions/cache /tmp/ocr_sessions/logs && \
-    chmod -R 777 /tmp/ocr_sessions && \
-    chown -R appuser:appuser /tmp/ocr_sessions
+# Create base directory for OCR sessions (storage will be mounted here)
+RUN mkdir -p /app/storage && \
+    chmod -R 777 /app/storage && \
+    chown -R appuser:appuser /app/storage
+
 
 # Switch to non-root user for security
 USER appuser
@@ -62,7 +63,8 @@ ENV PYTHONUNBUFFERED=1 \
     TRANSFORMERS_CACHE="/app/cache" \
     HF_DATASETS_CACHE="/app/cache" \
     MODEL_NAME="nanonets/Nanonets-OCR-s" \
-    STORAGE_PATH="/tmp/ocr_sessions"
+    STORAGE_PATH="/app/storage"
+
 
 # Expose port
 EXPOSE 7799

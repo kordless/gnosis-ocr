@@ -388,9 +388,64 @@ async def upload_job_chunk(upload_id: str, file: UploadFile = File(...)):
             filename = upload_session['filename']
             job_type = "pdf" if filename.lower().endswith('.pdf') else "image"
             
-            # Submit complete file to OCR job system (get user_email from upload session)
+            # Save uploaded file to storage first
             user_email = upload_session.get('user_email')
-            job_id = ocr_service.submit_job(complete_file_data, job_type=job_type, user_email=user_email)
+            from app.storage_service import StorageService
+            storage_service = StorageService(user_email=user_email)
+            session_id = await storage_service.create_session()
+            await storage_service.save_file(complete_file_data, filename, session_id)
+            
+            # Extract and save images if PDF
+            page_images = []
+            page_count = 1
+            if job_type == "pdf":
+                try:
+                    import pdf2image
+                    import io
+                    logger.info(f"Extracting images from PDF: {filename}")
+                    images = pdf2image.convert_from_bytes(
+                        complete_file_data,
+                        dpi=150,
+                        fmt='PNG',
+                        thread_count=2
+                    )
+                    
+                    page_count = len(images)
+                    for i, image in enumerate(images):
+                        image_filename = f"page_{i+1:03d}.png"
+                        
+                        # Convert PIL image to bytes
+                        img_buffer = io.BytesIO()
+                        image.save(img_buffer, format='PNG')
+                        image_bytes = img_buffer.getvalue()
+                        
+                        # Save image to storage
+                        await storage_service.save_file(image_bytes, image_filename, session_id)
+                        page_images.append(image_filename)
+                        
+                    logger.info(f"Extracted {page_count} pages from PDF")
+                except Exception as e:
+                    logger.error(f"Failed to extract PDF images: {e}")
+                    raise HTTPException(status_code=500, detail=f"Failed to process PDF: {str(e)}")
+            else:
+                # For single images, save the original as page_001
+                image_filename = f"page_001.png"
+                await storage_service.save_file(complete_file_data, image_filename, session_id)
+                page_images.append(image_filename)
+            
+            # Create file reference structure
+            file_reference = {
+                "session_id": session_id,
+                "filename": filename,
+                "file_type": job_type,
+                "page_count": page_count,
+                "page_images": page_images
+            }
+            
+            # Submit job with file reference instead of binary data
+            job_id = ocr_service.submit_job(file_reference, job_type=job_type, user_email=user_email, session_id=session_id)
+
+
 
             
             # Clean up upload session
@@ -421,13 +476,15 @@ async def upload_job_chunk(upload_id: str, file: UploadFile = File(...)):
 
 
 @app.get("/api/v1/jobs/status/{job_id}")
-
 async def get_job_status(job_id: str):
     """Get status and result of OCR job by ID"""
     result = ocr_service.get_job_status(job_id)
     if result["status"] == "not_found":
         raise HTTPException(status_code=404, detail="Job not found")
-    return result
+    
+    # Remove binary data from response to prevent UnicodeDecodeError
+    safe_result = {k: v for k, v in result.items() if k != "data"}
+    return safe_result
 
 
 @app.get("/job/{job_id}")
@@ -437,13 +494,14 @@ async def job_status_page(request: Request, job_id: str):
     if job["status"] == "not_found":
         raise HTTPException(status_code=404, detail="Job not found")
     
-    # Format result if it exists
-    if job.get("result"):
-        job["result"] = format_job_result(job["result"])
+    # Remove binary data and format result for template
+    safe_job = {k: v for k, v in job.items() if k != "data"}
+    if safe_job.get("result"):
+        safe_job["result"] = format_job_result(safe_job["result"])
     
     return templates.TemplateResponse("job_status.html", {
         "request": request,
-        "job": job,
+        "job": safe_job,
         "job_id": job_id
     })
 
@@ -463,9 +521,12 @@ async def job_result_page(request: Request, job_id: str):
     result = job["result"]
     text = format_job_result(result)
     
+    # Remove binary data from job for template
+    safe_job = {k: v for k, v in job.items() if k != "data"}
+    
     return templates.TemplateResponse("job_result.html", {
         "request": request,
-        "job": job,
+        "job": safe_job,
         "job_id": job_id,
         "text": text,
         "result": result
