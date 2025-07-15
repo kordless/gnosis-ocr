@@ -112,9 +112,25 @@ class OCRService:
             logger.info("Starting offline model load process...")
             self._download_progress = {"status": "loading", "progress": 0, "message": "Checking local cache..."}
             
-            # Set device
+            # Set device - debug NVIDIA/CUDA detection
             logger.info(f"CUDA available: {torch.cuda.is_available()}")
             logger.info(f"Settings device: {settings.device}")
+            logger.info(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}")
+            logger.info(f"PyTorch version: {torch.__version__}")
+            logger.info(f"PyTorch CUDA compiled version: {torch.version.cuda}")
+            
+            # Check nvidia-smi equivalent
+            try:
+                import subprocess
+                result = subprocess.run(['nvidia-smi'], capture_output=True, text=True, timeout=10)
+                logger.info(f"nvidia-smi exit code: {result.returncode}")
+                if result.stdout:
+                    logger.info(f"nvidia-smi output: {result.stdout[:500]}")
+                if result.stderr:
+                    logger.info(f"nvidia-smi stderr: {result.stderr[:200]}")
+            except Exception as e:
+                logger.info(f"nvidia-smi failed: {e}")
+            
             if torch.cuda.is_available() and settings.device == "cuda":
                 self.device = torch.device("cuda")
                 logger.info(f"Using GPU: {torch.cuda.get_device_name(0)}")
