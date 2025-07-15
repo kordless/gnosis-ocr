@@ -29,8 +29,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
-# Install core ML dependencies WITHOUT flash attention - use latest transformers for qwen2_5_vl support
-RUN pip install --no-cache-dir torch==2.1.2 torchvision==0.16.2 'numpy<2.0' && \
+# Install core ML dependencies with CUDA support - use latest transformers for qwen2_5_vl support
+RUN pip install --no-cache-dir torch==2.1.2+cu121 torchvision==0.16.2+cu121 'numpy<2.0' --index-url https://download.pytorch.org/whl/cu121 && \
     pip install --no-cache-dir git+https://github.com/huggingface/transformers.git qwen-vl-utils
 
 
