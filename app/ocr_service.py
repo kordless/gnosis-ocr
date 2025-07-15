@@ -398,9 +398,12 @@ class OCRService:
             text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             inputs = self.processor(text=[text], images=[image], padding=True, return_tensors="pt")
             
-            # Move to device if needed (should be minimal with device_map optimization)
-            if hasattr(self.model, 'device') and self.model.device != self.device:
+            # Move inputs to GPU if model is on GPU
+            if self.device.type == "cuda":
+                logger.info(f"Moving inputs to GPU device: {self.device}")
                 inputs = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+            else:
+                logger.info("Model on CPU, keeping inputs on CPU")
 
 
             
