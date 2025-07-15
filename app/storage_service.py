@@ -215,10 +215,7 @@ class StorageService:
             # GCS branch
             blob = self._bucket.blob(file_path)
             exists = blob.exists()
-            logger.debug("GCS file check",
-                       file_path=file_path,
-                       exists=exists,
-                       bucket=self._bucket.name)
+            logger.debug(f"GCS file check: {file_path} exists={exists} in bucket {self._bucket.name}")
             if not exists:
                 raise FileNotFoundError(f"File not found: {file_path}")
             return blob.download_as_bytes()
@@ -380,11 +377,7 @@ class StorageService:
         import uuid
         session_hash = str(uuid.uuid4())
         
-        logger.info("Creating session", 
-                   session_hash=session_hash,
-                   user_email=self._user_email,
-                   user_hash=self._user_hash,
-                   is_cloud=self._is_cloud)
+        logger.info(f"Creating session {session_hash} for user {self._user_email} (hash: {self._user_hash}, cloud: {self._is_cloud})")
         
         # Create session metadata
         metadata = {
@@ -400,9 +393,7 @@ class StorageService:
         # Save metadata
         await self.save_session_metadata(session_hash, metadata)
         
-        logger.info("Session created successfully", 
-                   session_hash=session_hash,
-                   session_path=self.get_session_path(session_hash))
+        logger.info(f"Session created successfully: {session_hash} at {self.get_session_path(session_hash)}")
         
         return session_hash
     
@@ -410,10 +401,7 @@ class StorageService:
         """Check if session exists and belongs to current user with retry for GCS eventual consistency"""
         import asyncio
         
-        logger.debug("Starting session validation",
-                    session_hash=session_hash,
-                    user_hash=self._user_hash,
-                    user_email=self._user_email)
+        logger.debug(f"Starting session validation for {session_hash}, user {self._user_email} (hash: {self._user_hash})")
         
         # Retry logic for GCS eventual consistency
         max_retries = 5
@@ -425,26 +413,17 @@ class StorageService:
                 metadata = json.loads(metadata_content)
                 stored_user_hash = metadata.get('user_hash')
                 
-                logger.debug("Session metadata found",
-                           session_hash=session_hash,
-                           stored_user_hash=stored_user_hash,
-                           current_user_hash=self._user_hash,
-                           stored_email=metadata.get('user_email'),
-                           current_email=self._user_email,
-                           match=stored_user_hash == self._user_hash)
+                logger.debug(f"Session metadata found: {session_hash}, stored_user={stored_user_hash}, current_user={self._user_hash}, match={stored_user_hash == self._user_hash}")
                 
                 return stored_user_hash == self._user_hash
             except FileNotFoundError:
                 if attempt < max_retries - 1:  # Don't wait on last attempt
                     delay = base_delay * (2 ** attempt)  # Exponential backoff
-                    logger.debug(f"Session validation retry {attempt + 1}, waiting {delay}s", 
-                               session_hash=session_hash, attempt=attempt + 1)
+                    logger.debug(f"Session validation retry {attempt + 1}, waiting {delay}s for {session_hash}")
                     await asyncio.sleep(delay)
                     continue
                 
-                logger.debug("Session not found after retries",
-                           session_hash=session_hash,
-                           attempts=max_retries)
+                logger.debug(f"Session not found after {max_retries} retries: {session_hash}")
                 return False
 
     
