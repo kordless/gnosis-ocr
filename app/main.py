@@ -1085,9 +1085,15 @@ async def upload_job_chunk(upload_id: str, file: UploadFile = File(...), request
                 # Submit job based on environment
                 if os.environ.get('RUNNING_IN_CLOUD') == 'true':
                     # Cloud path: Create Cloud Task for batch processing
-                    job_id = await create_cloud_processing_job(
-                        storage_service, session_id, file_reference, user_email
-                    )
+                    try:
+                        logger.info(f"About to create cloud processing job for session {session_id}")
+                        job_id = await create_cloud_processing_job(
+                            storage_service, session_id, file_reference, user_email
+                        )
+                        logger.info(f"Created cloud processing job: {job_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to create cloud processing job: {e}")
+                        raise
                 else:
                     # Local path: Use existing ThreadPoolExecutor - submit immediately
                     job_id = ocr_service.submit_job(file_reference, job_type=job_type, user_email=user_email, session_id=session_id)
@@ -1224,8 +1230,8 @@ async def upload_job_chunk(upload_id: str, file: UploadFile = File(...), request
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error uploading chunk: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to upload chunk")
+        logger.error(f"Error uploading chunk: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to upload chunk: {str(e)}")
 
 
 @app.get("/api/v1/jobs/status/{job_id}")
