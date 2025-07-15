@@ -35,8 +35,8 @@ WORKDIR /app
 # Install Python dependencies
 COPY requirements.txt .
 
-# Install CPU-only PyTorch for Cloud Run (much smaller)
-RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+# Install PyTorch with CUDA 12.1 support for GPU acceleration
+RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
 # Install other requirements
 RUN pip install --no-cache-dir -r requirements.txt
@@ -46,6 +46,11 @@ COPY app/ ./app/
 
 # Create cache directory
 RUN mkdir -p /app/cache
+
+# Disable IPv6 (HuggingFace compatibility)
+RUN echo 'net.ipv6.conf.all.disable_ipv6 = 1' >> /etc/sysctl.conf && \
+    echo 'net.ipv6.conf.default.disable_ipv6 = 1' >> /etc/sysctl.conf && \
+    echo 'net.ipv6.conf.lo.disable_ipv6 = 1' >> /etc/sysctl.conf
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
