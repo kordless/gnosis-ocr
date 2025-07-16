@@ -148,6 +148,96 @@ class ErrorResponse(BaseModel):
         }
 
 
+class PartialPageResult(BaseModel):
+    """Incremental OCR result for a single completed page"""
+    page_number: int = Field(..., description="Page number (1-indexed)")
+    text: str = Field(..., description="Extracted text in Markdown format")
+    status: str = Field(..., description="Page processing status (completed/failed)")
+    confidence: Optional[float] = Field(None, description="OCR confidence score")
+    processing_time: Optional[float] = Field(None, description="Page processing time in seconds")
+    completed_at: str = Field(..., description="ISO timestamp when page was completed")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "page_number": 1,
+                "text": "# Independent Core Observer Model (ICOM) Theory of Consciousness\n\nDavid J Kelley¹ and Dr. Mathew A. Twymon²...",
+                "status": "completed",
+                "confidence": 0.95,
+                "processing_time": 2.3,
+                "completed_at": "2025-07-16T21:25:10.123456"
+            }
+        }
+
+
+class JobProgress(BaseModel):
+    """Job processing progress information"""
+    current_step: str = Field(..., description="Current processing step")
+    message: str = Field(..., description="Progress message")
+    current_page: int = Field(..., description="Currently processing page number")
+    total_pages: int = Field(..., description="Total number of pages")
+    percent: int = Field(..., description="Processing progress percentage")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "current_step": "processing",
+                "message": "Processing OCR on page 2 of 10...",
+                "current_page": 2,
+                "total_pages": 10,
+                "percent": 20
+            }
+        }
+
+
+class JobStatusResponse(BaseModel):
+    """Complete job status response with incremental results"""
+    status: str = Field(..., description="Job status (pending/processing/completed/failed)")
+    type: str = Field(..., description="Job type (image/pdf)")
+    file_reference: Optional[Dict[str, Any]] = Field(None, description="File reference information")
+    user_email: Optional[str] = Field(None, description="User email")
+    session_id: Optional[str] = Field(None, description="Session identifier")
+    created: Optional[str] = Field(None, description="Job creation timestamp")
+    result: Optional[List[Dict[str, Any]]] = Field(None, description="Full results when complete")
+    error: Optional[str] = Field(None, description="Error message if failed")
+    progress: Optional[JobProgress] = Field(None, description="Current progress information")
+    partial_results: List[PartialPageResult] = Field(default=[], description="Incremental results as pages complete")
+    completed: Optional[str] = Field(None, description="Job completion timestamp")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "status": "processing",
+                "type": "pdf",
+                "file_reference": {
+                    "session_id": "123-456",
+                    "filename": "paper33.pdf",
+                    "page_count": 10
+                },
+                "progress": {
+                    "current_step": "processing",
+                    "message": "Processing OCR on page 2 of 10...",
+                    "current_page": 2,
+                    "total_pages": 10,
+                    "percent": 20
+                },
+                "partial_results": [
+                    {
+                        "page_number": 1,
+                        "text": "# Independent Core Observer Model (ICOM) Theory of Consciousness\n\nDavid J Kelley¹ and Dr. Mathew A. Twymon²...",
+                        "status": "completed",
+                        "confidence": 0.95,
+                        "processing_time": 2.3,
+                        "completed_at": "2025-07-16T21:25:10.123456"
+                    }
+                ],
+                "result": None,
+                "error": None,
+                "completed": None
+            }
+        }
+
+
 class HealthResponse(BaseModel):
     """Health check response"""
     status: str = Field(..., description="Service status")

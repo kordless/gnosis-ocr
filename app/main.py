@@ -23,7 +23,8 @@ from app import __version__
 from app.config import settings, validate_file_extension, format_file_size
 from app.models import (
     SessionStatus, OCRResult, ErrorResponse, 
-    HealthResponse, ProcessingStatus, PageResult
+    HealthResponse, ProcessingStatus, PageResult,
+    JobStatusResponse, PartialPageResult, JobProgress
 )
 from app.storage_service import StorageService
 from app.ocr_service import OCRService, ocr_service
@@ -267,7 +268,15 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app
 app = FastAPI(
     title="Gnosis OCR Service",
-    description="GPU-accelerated OCR service using Nanonets-OCR-s model with user partitioning",
+    description="""GPU-accelerated OCR service with incremental results.
+    
+    Features:
+    - Real-time incremental results as pages complete
+    - Chunked file uploads for large documents
+    - Cloud Run and local deployment support
+    - User partitioning for multi-tenant usage
+    - Nanonets-OCR-s model with GPU acceleration
+    """,
     version=__version__,
     lifespan=lifespan
 )
@@ -847,7 +856,15 @@ async def start_chunked_job_upload(
     request: Request,
     x_user_email: Optional[str] = Header(None)
 ):
-    """Start a new chunked upload for job submission"""
+    """Start a new chunked upload for job submission.
+    
+    Initiates the upload flow that leads to OCR processing with:
+    - Real-time incremental results as pages complete
+    - Progress tracking via job status endpoint
+    - Support for large files through chunked upload
+    
+    Returns upload_id for subsequent chunk uploads.
+    """
     try:
         upload_info = await request.json()
         filename = upload_info.get('filename')
@@ -906,7 +923,13 @@ async def start_chunked_job_upload(
 
 @app.post("/api/v1/jobs/submit/chunk/{upload_id}")
 async def upload_job_chunk(upload_id: str, file: UploadFile = File(...), request: Request = None):
-    """Upload a chunk for job submission"""
+    """Upload a chunk for job submission.
+    
+    Part of chunked upload flow that enables:
+    - Large file uploads (PDFs, images)
+    - OCR processing with incremental results
+    - Real-time progress updates via job status endpoint
+    """
     try:
         # Get chunk number from request headers (more robust extraction)
         chunk_number = None
@@ -1251,9 +1274,17 @@ async def upload_job_chunk(upload_id: str, file: UploadFile = File(...), request
         raise HTTPException(status_code=500, detail=f"Failed to upload chunk: {str(e)}")
 
 
-@app.get("/api/v1/jobs/status/{job_id}")
+@app.get("/api/v1/jobs/status/{job_id}", response_model=JobStatusResponse)
 async def get_job_status(job_id: str, request: Request):
-    """Get status and result of OCR job by ID - dual-path for cloud/local"""
+    """Get status and incremental results of OCR job by ID.
+    
+    Returns real-time job status including:
+    - Overall progress and current processing step
+    - Partial results for completed pages (available immediately)
+    - Full results when job is complete
+    
+    Works in both local and cloud deployment modes.
+    """
     
     if os.environ.get('RUNNING_IN_CLOUD') == 'true':
         # Cloud path: Read from processing.json in storage

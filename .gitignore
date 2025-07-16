@@ -57,9 +57,15 @@ build-logs/
 /tmp/ocr_sessions/
 ocr_sessions/
 *.pdf
+
+# Ignore images in most places, but allow documentation images
 *.png
 *.jpg
 *.jpeg
+!images/*.png
+!docs/images/*.png
+
+
 
 # Model cache (if stored locally)
 model-cache/

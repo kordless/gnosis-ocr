@@ -419,23 +419,41 @@ async function checkJobStatus(jobId) {
             clearInterval(statusCheckInterval);
             updateProgress(100, 'Processing complete!');
             
-            // Show results
+            // Show final results
             if (status.result) {
                 showResults(jobId, status.result);
             }
         } else if (status.status === 'failed') {
             clearInterval(statusCheckInterval);
             showError(`Processing failed: ${status.error || 'Unknown error'}`);
-        } else if (status.status === 'processing') {
+        } else if (status.status === 'processing' || status.status === 'pending') {
             // Update progress based on job progress
             const progress = status.progress || {};
+            const fileRef = status.file_reference || {};
+            
+            // Enhanced progress message for PDFs
+            let progressMessage = progress.message || 'Processing...';
+            if (fileRef.file_type === 'pdf' && fileRef.page_count > 1) {
+                if (status.status === 'pending') {
+                    progressMessage = `PDF detected: ${fileRef.page_count} pages - ${progress.message || 'Waiting to start...'}`;
+                } else if (progress.current_page && progress.total_pages) {
+                    progressMessage = `Processing page ${progress.current_page} of ${progress.total_pages}`;
+                }
+            }
+            
             updateProgress(
                 progress.percent || 0, 
-                progress.message || 'Processing...',
+                progressMessage,
                 progress.current_page,
-                progress.total_pages
+                progress.total_pages || fileRef.page_count
             );
+            
+            // Show incremental results as pages complete
+            if (status.partial_results && status.partial_results.length > 0) {
+                showIncrementalResults(status);
+            }
         }
+
         
     } catch (error) {
         statusCheckFailureCount++;
@@ -447,6 +465,7 @@ async function checkJobStatus(jobId) {
         }
     }
 }
+
 
 
 async function checkStatus() {
@@ -517,6 +536,56 @@ async function checkStatus() {
 
 }
 
+// Show incremental results as pages complete
+function showIncrementalResults(status) {
+    // Show results section if not already visible
+    if (progressSection.classList.contains('hidden')) {
+        return; // Don't show if we're not in progress mode
+    }
+    
+    // Create or update incremental results container
+    let incrementalContainer = document.getElementById('incremental-results');
+    if (!incrementalContainer) {
+        incrementalContainer = document.createElement('div');
+        incrementalContainer.id = 'incremental-results';
+        incrementalContainer.className = 'incremental-results';
+        incrementalContainer.innerHTML = `
+            <h3>Extracted Text (Live Preview)</h3>
+            <div id="incremental-content" class="incremental-content"></div>
+        `;
+        
+        // Insert after progress section
+        const progressInfo = document.querySelector('.progress-info');
+        progressInfo.parentNode.insertBefore(incrementalContainer, progressInfo.nextSibling);
+    }
+    
+    const contentDiv = document.getElementById('incremental-content');
+    
+    // Build combined markdown from all completed pages
+    let combinedMarkdown = '';
+    const sortedResults = status.partial_results.sort((a, b) => a.page_number - b.page_number);
+    
+    for (const pageResult of sortedResults) {
+        if (pageResult.status === 'completed' && pageResult.text) {
+            combinedMarkdown += `\n\n---\n\n${pageResult.text}`;
+        }
+    }
+    
+    // Render markdown to HTML
+    if (combinedMarkdown.trim()) {
+        const html = marked.parse(combinedMarkdown);
+        contentDiv.innerHTML = html;
+        
+        // Highlight code blocks
+        contentDiv.querySelectorAll('pre code').forEach(block => {
+            hljs.highlightElement(block);
+        });
+        
+        // Scroll to bottom to show new content
+        contentDiv.scrollTop = contentDiv.scrollHeight;
+    }
+}
+
 // Load Results
 async function loadResults() {
     try {
@@ -531,8 +600,15 @@ async function loadResults() {
     }
 }
 
+
 // Display Results
 function displayResults() {
+    // Clean up incremental results when showing final results
+    const incrementalContainer = document.getElementById('incremental-results');
+    if (incrementalContainer) {
+        incrementalContainer.remove();
+    }
+    
     showSection('results');
     
     // Populate page selectors
@@ -545,6 +621,7 @@ function displayResults() {
     // Display metadata
     displayMetadata();
 }
+
 
 function populatePageSelectors() {
     pageSelect.innerHTML = '';
@@ -715,6 +792,12 @@ function resetToUpload() {
         clearInterval(statusCheckInterval);
     }
     
+    // Clean up incremental results
+    const incrementalContainer = document.getElementById('incremental-results');
+    if (incrementalContainer) {
+        incrementalContainer.remove();
+    }
+    
     // WebSocket cleanup removed - using polling only
     
     // Reset file input
@@ -723,6 +806,7 @@ function resetToUpload() {
     // Show upload section
     showSection('upload');
 }
+
 
 
 // Logging Functions - only log errors in client
