@@ -20,12 +20,14 @@
 - 🚀 **GPU-Accelerated Processing** - Powered by NVIDIA CUDA for blazing-fast OCR
 - 🎯 **State-of-the-Art Models** - Uses Nanonets OCR-s for superior accuracy
 - 📄 **Large File Support** - Process up to 500MB PDFs with HTTP/2 streaming (uploads work during model loading)
-
+- ⚡ **Live Results Preview** - See extracted text in real-time as pages complete
+- 🔄 **Incremental Processing** - No waiting - results appear as they're ready
 - ☁️ **Cloud Native** - Deploy to Google Cloud Run with auto-scaling
 - 🔒 **Enterprise Security** - User isolation, session management, and audit trails
 - 📊 **Real-Time Progress** - Live processing updates and detailed analytics
 - 🌐 **Modern Web UI** - Beautiful, responsive interface with dark mode
 - 🔌 **REST API** - Full programmatic access with OpenAPI docs
+
 
 
 ## 🚀 Quick Start
@@ -72,13 +74,15 @@ See [Deployment Guide](docs/UNIFIED_DEPLOYMENT.md) for detailed instructions.
 <div align="center">
 
 ### Document Upload
-![Upload Interface](https://via.placeholder.com/600x300/2563eb/ffffff?text=Drag+%26+Drop+Interface)
+![Upload Interface](https://raw.githubusercontent.com/kordless/gnosis-ocr/main/images/upload.PNG)
 
-### Real-Time Processing
-![Processing View](https://via.placeholder.com/600x300/10b981/ffffff?text=Live+Progress+Tracking)
+### Live Results Preview
+![Live Preview](https://raw.githubusercontent.com/kordless/gnosis-ocr/main/images/liveview.PNG)
 
 ### OCR Results
-![Results Display](https://via.placeholder.com/600x300/6366f1/ffffff?text=Extracted+Text+%26+Metadata)
+![Results Display](https://raw.githubusercontent.com/kordless/gnosis-ocr/main/images/ocrresults.PNG)
+
+
 
 </div>
 
@@ -109,12 +113,14 @@ graph TD
 ## 🎯 Performance
 
 | Metric | Local (RTX 3090) | Cloud Run (L4) | 
-|--------|-------------------|--------------------|
+|--------|-------------------|--------------------
 | **Model Startup** | ~4 minutes | ~30 seconds |
 | **Processing Speed** | ~20 sec/page | ~5-10 sec/page |
+| **Live Preview** | ✅ Real-time | ✅ Real-time |
 | **Max File Size** | 500MB | 500MB |
 | **Concurrent Users** | 1-2 | 10+ |
 | **Model Loading** | Cached | Persistent Mount |
+
 
 
 ## 🔧 Configuration
@@ -175,26 +181,57 @@ curl -X POST "http://localhost:7799/api/v1/jobs/submit" \
   -F "file=@document.pdf"
 ```
 
-### Check Status
+### Check Status (with Live Results)
 ```bash
 curl "http://localhost:7799/api/v1/jobs/{job_id}/status"
+# Returns incremental results in partial_results array
 ```
 
-### Get Results
+### Get Final Results
 ```bash
 curl "http://localhost:7799/api/v1/jobs/{job_id}/result"
 ```
+
+### Example Status Response
+```json
+{
+  "status": "processing",
+  "progress": {
+    "current_page": 3,
+    "total_pages": 10,
+    "percent": 30
+  },
+  "partial_results": [
+    {
+      "page_number": 1,
+      "text": "# Document Title\nExtracted content...",
+      "status": "completed",
+      "confidence": 0.95
+    },
+    {
+      "page_number": 2,
+      "text": "Page 2 content...",
+      "status": "completed",
+      "confidence": 0.93
+    }
+  ]
+}
+```
+
 
 Complete API documentation available at `/docs` endpoint.
 
 ## 🏢 Enterprise Features
 
+- **Live Results Streaming** - Real-time text extraction as pages complete
+- **Incremental Processing** - No waiting for entire documents to finish
 - **Multi-Tenant Architecture** - User isolation and data partitioning
 - **Audit Logging** - Complete request/response tracking
 - **Auto-Scaling** - Handles traffic spikes automatically
 - **Health Monitoring** - Built-in health checks and metrics
 - **Security** - CORS, rate limiting, and input validation
 - **Storage Integration** - Google Cloud Storage with lifecycle management
+
 
 ## 🤝 Contributing
 

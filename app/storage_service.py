@@ -12,14 +12,15 @@ from datetime import datetime
 from pathlib import Path
 import logging
 
+logger = logging.getLogger(__name__)
+
 try:
     from google.cloud import storage as gcs
     from google.cloud.exceptions import NotFound
-    HAS_GCS = True
+    GCS_AVAILABLE = True
 except ImportError:
-    HAS_GCS = False
-
-logger = logging.getLogger(__name__)
+    GCS_AVAILABLE = False
+    logger.warning("Google Cloud Storage not available - local mode only")
 
 
 def is_running_in_cloud() -> bool:
@@ -54,7 +55,7 @@ class StorageService:
         
         # Initialize storage backend
         if self._is_cloud:
-            if not HAS_GCS:
+            if not GCS_AVAILABLE:
                 raise RuntimeError("Google Cloud Storage client not installed")
             self._init_gcs()
         else:
@@ -66,11 +67,16 @@ class StorageService:
         logger.info(f"StorageService initialized - Cloud: {self._is_cloud}, User: {self._user_hash}")
     
     def force_cloud_mode(self):
-        """Force storage service to use cloud mode (for Cloud Run deployments)
-        
-        Deprecated: Storage service now always uses GCS
-        """
-        logger.debug("force_cloud_mode called but storage always uses GCS now")
+        """Force storage service to use cloud mode (for Cloud Run deployments)"""
+        if not self._is_cloud:
+            logger.info("Forcing cloud mode for deployment")
+            self._is_cloud = True
+            if GCS_AVAILABLE:
+                self._init_gcs()
+            else:
+                raise RuntimeError("Cannot force cloud mode: GCS libraries not available")
+        else:
+            logger.debug("Already in cloud mode")
     
     def _compute_user_hash(self, email: str) -> str:
         """Compute 12-char hash for user bucketing"""
@@ -78,7 +84,7 @@ class StorageService:
     
     def _init_gcs(self):
         """Initialize Google Cloud Storage client"""
-        if not HAS_GCS:
+        if not GCS_AVAILABLE:
             raise RuntimeError("Google Cloud Storage client not installed. Install with: pip install google-cloud-storage")
         
         from google.cloud import storage as gcs_module
@@ -90,12 +96,21 @@ class StorageService:
             raise RuntimeError(f"GCS bucket {self.config['gcs_bucket']} does not exist")
     
     def _init_local(self):
-        """Initialize local storage (deprecated - always use GCS)"""
-        logger.warning("Local storage mode deprecated - should use GCS")
-        if not HAS_GCS:
-            raise RuntimeError("GCS not available and local storage is deprecated. Install google-cloud-storage: pip install google-cloud-storage")
-        # Force GCS mode instead
-        self._init_gcs()
+        """Initialize local filesystem storage"""
+        self._storage_root = "/app/storage"
+        self._ensure_local_dirs()
+        logger.info(f"Local storage initialized at {self._storage_root}")
+    
+    def _ensure_local_dirs(self):
+        """Ensure required local directories exist"""
+        base_dirs = [
+            self._storage_root,
+            f"{self._storage_root}/users"
+        ]
+        for dir_path in base_dirs:
+            os.makedirs(dir_path, exist_ok=True)
+            logger.debug(f"Ensured directory exists: {dir_path}")
+
 
     
     def _get_cache_path(self) -> str:
@@ -154,18 +169,26 @@ class StorageService:
         else:
             file_path = f"{self.get_user_path()}/{filename}"
         
-        blob = self._bucket.blob(file_path)
-        blob.upload_from_string(content)
-        logger.info(f"Saved file to GCS: {file_path}")
-        
-        # Force consistency check for critical files
-        if filename in ['metadata.json', 'status.json']:
-            # Verify the file was written
-            if not blob.exists():
-                logger.warning(f"GCS consistency issue - file not immediately available: {file_path}")
-            else:
-                logger.debug(f"GCS file verified: {file_path}, size: {blob.size} bytes")
-
+        if self._is_cloud:
+            # GCS branch
+            blob = self._bucket.blob(file_path)
+            blob.upload_from_string(content)
+            logger.info(f"Saved file to GCS: {file_path}")
+            
+            # Force consistency check for critical files
+            if filename in ['metadata.json', 'status.json']:
+                # Verify the file was written
+                if not blob.exists():
+                    logger.warning(f"GCS consistency issue - file not immediately available: {file_path}")
+                else:
+                    logger.debug(f"GCS file verified: {file_path}, size: {blob.size} bytes")
+        else:
+            # Local filesystem branch
+            full_path = f"{self._storage_root}/{file_path}"
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, 'wb') as f:
+                f.write(content)
+            logger.info(f"Saved file locally: {full_path}")
         
         return file_path
     
@@ -188,15 +211,21 @@ class StorageService:
         else:
             file_path = f"{self.get_user_path()}/{filename}"
         
-        blob = self._bucket.blob(file_path)
-        exists = blob.exists()
-        logger.debug("GCS file check",
-                   file_path=file_path,
-                   exists=exists,
-                   bucket=self._bucket.name)
-        if not exists:
-            raise FileNotFoundError(f"File not found: {file_path}")
-        return blob.download_as_bytes()
+        if self._is_cloud:
+            # GCS branch
+            blob = self._bucket.blob(file_path)
+            exists = blob.exists()
+            logger.debug(f"GCS file check: {file_path} exists={exists} in bucket {self._bucket.name}")
+            if not exists:
+                raise FileNotFoundError(f"File not found: {file_path}")
+            return blob.download_as_bytes()
+        else:
+            # Local filesystem branch
+            full_path = f"{self._storage_root}/{file_path}"
+            if not os.path.exists(full_path):
+                raise FileNotFoundError(f"File not found: {full_path}")
+            with open(full_path, 'rb') as f:
+                return f.read()
 
     
     async def delete_file(self, filename: str, session_hash: Optional[str] = None) -> bool:
@@ -215,12 +244,22 @@ class StorageService:
         else:
             file_path = f"{self.get_user_path()}/{filename}"
         
-        blob = self._bucket.blob(file_path)
-        if blob.exists():
-            blob.delete()
-            logger.info(f"Deleted file from GCS: {file_path}")
-            return True
-        return False
+        if self._is_cloud:
+            # GCS branch
+            blob = self._bucket.blob(file_path)
+            if blob.exists():
+                blob.delete()
+                logger.info(f"Deleted file from GCS: {file_path}")
+                return True
+            return False
+        else:
+            # Local filesystem branch
+            full_path = f"{self._storage_root}/{file_path}"
+            if os.path.exists(full_path):
+                os.remove(full_path)
+                logger.info(f"Deleted file locally: {full_path}")
+                return True
+            return False
 
     
     async def list_files(self, prefix: Optional[str] = None, 
@@ -245,13 +284,28 @@ class StorageService:
         
         files = []
         
-        blobs = self._bucket.list_blobs(prefix=search_prefix)
-        for blob in blobs:
-            files.append({
-                'name': blob.name.replace(search_prefix + '/', ''),
-                'size': blob.size,
-                'modified': blob.updated.isoformat() if blob.updated else None
-            })
+        if self._is_cloud:
+            # GCS branch
+            blobs = self._bucket.list_blobs(prefix=search_prefix)
+            for blob in blobs:
+                files.append({
+                    'name': blob.name.replace(search_prefix + '/', ''),
+                    'size': blob.size,
+                    'modified': blob.updated.isoformat() if blob.updated else None
+                })
+        else:
+            # Local filesystem branch
+            full_path = f"{self._storage_root}/{search_prefix}"
+            if os.path.exists(full_path):
+                for item in os.listdir(full_path):
+                    item_path = os.path.join(full_path, item)
+                    if os.path.isfile(item_path):
+                        stat = os.stat(item_path)
+                        files.append({
+                            'name': item,
+                            'size': stat.st_size,
+                            'modified': datetime.fromtimestamp(stat.st_mtime).isoformat()
+                        })
         
         return files
 
@@ -323,12 +377,8 @@ class StorageService:
         import uuid
         session_hash = str(uuid.uuid4())
         
-        logger.info("Creating session", 
-                   session_hash=session_hash,
-                   user_email=self._user_email,
-                   user_hash=self._user_hash,
-                   is_cloud=self._is_cloud)
-        
+        logger.info(f"Creating session {session_hash} for user {self._user_email} (hash: {self._user_hash}, cloud: {self._is_cloud})")
+        logger.info("confirming we're running new code")
         # Create session metadata
         metadata = {
             'session_id': session_hash,
@@ -343,9 +393,7 @@ class StorageService:
         # Save metadata
         await self.save_session_metadata(session_hash, metadata)
         
-        logger.info("Session created successfully", 
-                   session_hash=session_hash,
-                   session_path=self.get_session_path(session_hash))
+        logger.info(f"Session created successfully: {session_hash} at {self.get_session_path(session_hash)}")
         
         return session_hash
     
@@ -353,10 +401,7 @@ class StorageService:
         """Check if session exists and belongs to current user with retry for GCS eventual consistency"""
         import asyncio
         
-        logger.debug("Starting session validation",
-                    session_hash=session_hash,
-                    user_hash=self._user_hash,
-                    user_email=self._user_email)
+        logger.debug(f"Starting session validation for {session_hash}, user {self._user_email} (hash: {self._user_hash})")
         
         # Retry logic for GCS eventual consistency
         max_retries = 5
@@ -368,26 +413,17 @@ class StorageService:
                 metadata = json.loads(metadata_content)
                 stored_user_hash = metadata.get('user_hash')
                 
-                logger.debug("Session metadata found",
-                           session_hash=session_hash,
-                           stored_user_hash=stored_user_hash,
-                           current_user_hash=self._user_hash,
-                           stored_email=metadata.get('user_email'),
-                           current_email=self._user_email,
-                           match=stored_user_hash == self._user_hash)
+                logger.debug(f"Session metadata found: {session_hash}, stored_user={stored_user_hash}, current_user={self._user_hash}, match={stored_user_hash == self._user_hash}")
                 
                 return stored_user_hash == self._user_hash
             except FileNotFoundError:
                 if attempt < max_retries - 1:  # Don't wait on last attempt
                     delay = base_delay * (2 ** attempt)  # Exponential backoff
-                    logger.debug(f"Session validation retry {attempt + 1}, waiting {delay}s", 
-                               session_hash=session_hash, attempt=attempt + 1)
+                    logger.debug(f"Session validation retry {attempt + 1}, waiting {delay}s for {session_hash}")
                     await asyncio.sleep(delay)
                     continue
                 
-                logger.debug("Session not found after retries",
-                           session_hash=session_hash,
-                           attempts=max_retries)
+                logger.debug(f"Session not found after {max_retries} retries: {session_hash}")
                 return False
 
     
@@ -398,11 +434,19 @@ class StorageService:
         
         session_path = self.get_session_path(session_hash)
         
-        # Delete all blobs with session prefix
-        blobs = list(self._bucket.list_blobs(prefix=session_path))
-        for blob in blobs:
-            blob.delete()
-        logger.info(f"Deleted session from GCS: {session_path}")
+        if self._is_cloud:
+            # GCS branch
+            blobs = list(self._bucket.list_blobs(prefix=session_path))
+            for blob in blobs:
+                blob.delete()
+            logger.info(f"Deleted session from GCS: {session_path}")
+        else:
+            # Local filesystem branch
+            full_path = f"{self._storage_root}/{session_path}"
+            if os.path.exists(full_path):
+                shutil.rmtree(full_path)
+                logger.info(f"Deleted session locally: {full_path}")
+        
         return True
 
     

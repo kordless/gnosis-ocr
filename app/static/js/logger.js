@@ -177,12 +177,13 @@ class FrontendLogger {
     }
 }
 
-// Global logger instance
+// Global logger instance - only enable remote logging for errors
 window.Logger = new FrontendLogger({
     context: {
         page: 'gnosis-ocr',
         version: '2.0'
-    }
+    },
+    enableRemote: false  // Disable remote logging except for errors
 });
 
 // Convenience global methods

@@ -39,7 +39,16 @@ if ($Target -in @("staging", "cloud", "cloudrun")) {
         Write-Host "Loading environment from .env.cloudrun..." -ForegroundColor Gray
         Get-Content $envFile | Where-Object { $_ -match '^\s*[^#].*=' } | ForEach-Object {
             $key, $value = $_ -split '=', 2
-            $envConfig[$key.Trim()] = $value.Trim()
+            # Remove inline comments (everything after # that's not in quotes)
+            if ($value -match '^([^#]*)(\s*#.*)?$') {
+                $value = $matches[1]
+            }
+            # Remove surrounding quotes if present
+            $value = $value.Trim()
+            if ($value.StartsWith('"') -and $value.EndsWith('"')) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+            $envConfig[$key.Trim()] = $value
         }
         $projectId = $envConfig["PROJECT_ID"]
     } else {
@@ -449,28 +458,30 @@ switch ($Target) {
 
                         Write-Host "Deploying with NVIDIA L4 GPU and GCS bucket mount..." -ForegroundColor White
                         
+                        # Build environment variables string
+                        $envVars = ($envConfig.GetEnumerator() | Where-Object { $_.Key -ne "PROJECT_ID" } | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ","
+                        
                         $deployArgs = @(
                             "run", "deploy", "gnosis-ocr"
                             "--image", $gcrImage
                             "--region", "us-central1"
                             "--platform", "managed"
                             "--allow-unauthenticated"
-                            "--memory", "16Gi"
-                            "--cpu", "4"
+                            "--memory", "32Gi"
+                            "--cpu", "8"
                             "--gpu", "1"
                             "--gpu-type", "nvidia-l4"
-                            "--timeout", "3600"
                             "--concurrency", "1"
                             "--min-instances", "1"
                             "--max-instances", "2"
-
+                            "--session-affinity"
                             "--execution-environment", "gen2"
                             "--no-cpu-throttling"
                             "--port", "8080"
                             "--cpu-boost"
                             "--add-volume", "name=model-cache,type=cloud-storage,bucket=gnosis-ocr-models"
                             "--add-volume-mount", "volume=model-cache,mount-path=/app/cache"
-                            "--set-env-vars", "RUNNING_IN_CLOUD=true,GCS_BUCKET_NAME=gnosis-ocr-storage,MODEL_BUCKET_NAME=gnosis-ocr-models,MODEL_CACHE_PATH=/app/cache,HF_HOME=/app/cache,TRANSFORMERS_CACHE=/app/cache,DEVICE=cuda,CUDA_VISIBLE_DEVICES=0,MAX_FILE_SIZE=104857600,SESSION_TIMEOUT=1800,LOG_LEVEL=INFO"
+                            "--set-env-vars", $envVars
                             "--service-account", "949870462453-compute@developer.gserviceaccount.com"
                         )
                         

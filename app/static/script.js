@@ -76,7 +76,7 @@ function updateUploadArea(status) {
             break;
         case 'ready':
             h2.textContent = 'Drop PDF file here or click to browse';
-            p.textContent = 'Maximum file size: 50MB';
+            p.textContent = 'Maximum file size: 500MB';
             button.disabled = false;
             button.textContent = 'Browse Files';
             uploadArea.style.opacity = '1';
@@ -103,7 +103,7 @@ function updateUploadArea(status) {
 let currentSession = null;
 let ocrResults = null;
 let statusCheckInterval = null;
-let progressWebSocket = null;
+// WebSocket removed - using polling only
 let uploadPaused = false;
 let currentUploadSession = null;
 
@@ -190,16 +190,20 @@ function handleDrop(e) {
     }
 }
 
-// Upload File - Smart chunking based on file size
+// Upload File - Always use chunked upload for cloud compatibility
 async function uploadFile(file) {
-    // Validate file
-    if (file.type !== 'application/pdf') {
-        showError('Please upload a PDF file');
-        return;
-    }
+    // Validate file type
+    const validTypes = [
+        'application/pdf',
+        'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 
+        'image/webp', 'image/bmp', 'image/tiff', 'image/tif'
+    ];
     
-    if (file.size > 524288000) { // 500MB - leveraging chunked streaming architecture
-        showError('File size exceeds 500MB limit');
+    const fileExt = file.name.toLowerCase().split('.').pop();
+    const validExtensions = ['pdf', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tif'];
+    
+    if (!validTypes.includes(file.type) && !validExtensions.includes(fileExt)) {
+        showError('Please upload a PDF or image file (PDF, JPG, PNG, GIF, WEBP, BMP, TIFF)');
         return;
     }
     
@@ -207,49 +211,15 @@ async function uploadFile(file) {
     showSection('progress');
     updateProgress(0, 'Preparing upload...');
     
-    // For job-based system, always use normal upload
-    // Large files are handled by job queuing
-    await uploadFileNormal(file);
+    // Always use chunked upload for Google Cloud Run compatibility
+    await uploadFileChunked(file);
 }
 
-// Job-based upload - submit job and redirect to job page
-async function uploadFileNormal(file) {
-    const formData = new FormData();
-    formData.append('file', file);
-    
-    try {
-        updateProgress(10, 'Submitting job...');
-        
-        const response = await fetch('/api/v1/jobs/submit', {
-            method: 'POST',
-            body: formData
-        });
-        
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.detail || error.message || 'Job submission failed');
-        }
-        
-        const data = await response.json();
-        const jobId = data.job_id;
-        
-        logInfo('Job submitted successfully', {
-            job_id: jobId,
-            status: data.status,
-            status_url: data.status_url
-        });
-        
-        // Redirect to job status page
-        window.location.href = `/job/${jobId}`;
-        
-    } catch (error) {
-        showError(error.message);
-    }
-}
+// Non-chunked upload removed - using only chunked upload for cloud compatibility
 
-// Chunked upload for large files
+// Chunked upload - now used for all files for cloud compatibility
 async function uploadFileChunked(file) {
-    const CHUNK_SIZE = 1024 * 1024; // 1MB chunks
+    const CHUNK_SIZE = 1024 * 1024; // 1MB chunks - optimal for Google Cloud Run
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
     
     try {
@@ -273,19 +243,14 @@ async function uploadFileChunked(file) {
         }
         
         const sessionData = await startResponse.json();
+        
         currentSession = sessionData.upload_id;
         currentUploadSession = sessionData;
         
-        // Setup WebSocket for real-time progress (using upload_id)
-        setupProgressWebSocket(currentSession);
+        
+        // WebSocket functionality removed - using polling instead
 
         
-        logInfo('Chunked upload started', {
-            session: currentSession,
-            filename: file.name,
-            file_size: file.size,
-            total_chunks: totalChunks
-        });
         
         // Upload chunks
         let jobId = null;
@@ -304,7 +269,6 @@ async function uploadFileChunked(file) {
             // Check if upload is complete (last chunk)
             if (chunkResult.upload_complete) {
                 jobId = chunkResult.job_id;
-                logInfo('Upload complete, job created', { session: currentSession, job_id: jobId });
                 updateProgress(100, 'Upload complete, processing...');
                 break;
             }
@@ -334,6 +298,7 @@ async function uploadChunk(sessionHash, chunkNumber, chunk) {
         
         reader.onload = async function(e) {
             try {
+                
                 const arrayBuffer = e.target.result;
                 // Convert to base64 safely for large chunks
                 const uint8Array = new Uint8Array(arrayBuffer);
@@ -348,22 +313,38 @@ async function uploadChunk(sessionHash, chunkNumber, chunk) {
                 const chunkBlob = new Blob([uint8Array]);
                 formData.append('file', chunkBlob, `chunk_${chunkNumber}`);
                 
+                
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+                
                 const response = await fetch(`/api/v1/jobs/submit/chunk/${sessionHash}`, {
                     method: 'POST',
                     headers: { 'X-Chunk-Number': chunkNumber.toString() },
-                    body: formData
+                    body: formData,
+                    signal: controller.signal
                 });
+                
+                clearTimeout(timeoutId);
+                
 
                 
                 if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.message || `Failed to upload chunk ${chunkNumber}`);
+                    let errorMessage = `HTTP ${response.status}: Failed to upload chunk ${chunkNumber}`;
+                    try {
+                        const error = await response.json();
+                        errorMessage = error.message || errorMessage;
+                    } catch (e) {
+                        // If response is not JSON (e.g., HTML error page), use status text
+                        errorMessage = `HTTP ${response.status} ${response.statusText}: ${errorMessage}`;
+                    }
+                    throw new Error(errorMessage);
                 }
                 
                 const result = await response.json();
                 resolve(result);
                 
             } catch (error) {
+                logError('Chunk upload failed', { chunkNumber, sessionHash, error: error.message });
                 reject(error);
             }
         };
@@ -373,63 +354,9 @@ async function uploadChunk(sessionHash, chunkNumber, chunk) {
     });
 }
 
-// Setup WebSocket for real-time progress updates
-function setupProgressWebSocket(sessionId) {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/progress/${sessionId}`;
-    
-    progressWebSocket = new WebSocket(wsUrl);
-    
-    progressWebSocket.onopen = function() {
-        logInfo('WebSocket connected', { session: sessionId });
-    };
-    
-    progressWebSocket.onmessage = function(event) {
-        const data = JSON.parse(event.data);
-        handleProgressUpdate(data);
-    };
-    
-    progressWebSocket.onerror = function(error) {
-        logError('WebSocket error', { session: sessionId, error: error.message });
-    };
-    
-    progressWebSocket.onclose = function() {
-        logInfo('WebSocket disconnected', { session: sessionId });
-        progressWebSocket = null;
-    };
-}
+// WebSocket functionality removed - using status polling instead
 
-// Handle progress updates from WebSocket
-function handleProgressUpdate(data) {
-    switch (data.type) {
-        case 'upload_progress':
-            updateProgress(
-                data.progress_percent,
-                data.message,
-                null,
-                null,
-                `${data.received_chunks}/${data.total_chunks} chunks`
-            );
-            break;
-            
-        case 'upload_complete':
-            updateProgress(100, data.message);
-            break;
-            
-        case 'processing_started':
-            updateProgress(0, data.message);
-            // Switch to regular status checking for OCR progress
-            startStatusChecking();
-            break;
-            
-        case 'error':
-            showError(data.message);
-            break;
-            
-        default:
-            logDebug('Unknown progress update', data);
-    }
-}
+// WebSocket progress updates removed - using status polling instead
 
 // Wait for upload resume (placeholder for pause/resume functionality)
 async function waitForResume() {
@@ -454,7 +381,7 @@ function startStatusChecking() {
     }
     // Reset failure count
     statusCheckFailureCount = 0;
-    statusCheckInterval = setInterval(checkStatus, 1000);
+    statusCheckInterval = setInterval(checkStatus, 10000);
 }
 
 // Job status checking for new job system
@@ -465,7 +392,7 @@ function startJobStatusChecking(jobId) {
     }
     // Reset failure count
     statusCheckFailureCount = 0;
-    statusCheckInterval = setInterval(() => checkJobStatus(jobId), 1000);
+    statusCheckInterval = setInterval(() => checkJobStatus(jobId), 10000);
 }
 
 async function checkJobStatus(jobId) {
@@ -492,23 +419,41 @@ async function checkJobStatus(jobId) {
             clearInterval(statusCheckInterval);
             updateProgress(100, 'Processing complete!');
             
-            // Show results
+            // Show final results
             if (status.result) {
                 showResults(jobId, status.result);
             }
         } else if (status.status === 'failed') {
             clearInterval(statusCheckInterval);
             showError(`Processing failed: ${status.error || 'Unknown error'}`);
-        } else if (status.status === 'processing') {
+        } else if (status.status === 'processing' || status.status === 'pending') {
             // Update progress based on job progress
             const progress = status.progress || {};
+            const fileRef = status.file_reference || {};
+            
+            // Enhanced progress message for PDFs
+            let progressMessage = progress.message || 'Processing...';
+            if (fileRef.file_type === 'pdf' && fileRef.page_count > 1) {
+                if (status.status === 'pending') {
+                    progressMessage = `PDF detected: ${fileRef.page_count} pages - ${progress.message || 'Waiting to start...'}`;
+                } else if (progress.current_page && progress.total_pages) {
+                    progressMessage = `Processing page ${progress.current_page} of ${progress.total_pages}`;
+                }
+            }
+            
             updateProgress(
                 progress.percent || 0, 
-                progress.message || 'Processing...',
+                progressMessage,
                 progress.current_page,
-                progress.total_pages
+                progress.total_pages || fileRef.page_count
             );
+            
+            // Show incremental results as pages complete
+            if (status.partial_results && status.partial_results.length > 0) {
+                showIncrementalResults(status);
+            }
         }
+
         
     } catch (error) {
         statusCheckFailureCount++;
@@ -522,30 +467,18 @@ async function checkJobStatus(jobId) {
 }
 
 
+
 async function checkStatus() {
     if (!currentSession) {
-        logDebug('checkStatus called but no currentSession');
         return;
     }
     
-    // Only log every 10th check to reduce noise (every 10 seconds instead of every second)
-    if (statusCheckFailureCount === 0 || Math.floor(Date.now() / 1000) % 10 === 0) {
-        logDebug('Checking status', { session: currentSession });
-    }
     
     try {
         const response = await fetch(`/status/${currentSession}`, {
             timeout: 10000 // 10 second timeout
         });
         
-        // Only log status checks on errors or every 10th check
-        if (!response.ok || Math.floor(Date.now() / 1000) % 10 === 0) {
-            logStatus(currentSession, 'status_check', {
-                status: response.status,
-                ok: response.ok,
-                url: response.url
-            });
-        }
 
         
         if (!response.ok) {
@@ -565,8 +498,6 @@ async function checkStatus() {
         // Reset failure count on successful response
         statusCheckFailureCount = 0;
         
-        logStatus(currentSession, 'status_received', status);
-        
         // Update progress
         updateProgress(
             status.progress,
@@ -577,7 +508,6 @@ async function checkStatus() {
         
         // Check if completed
         if (status.status === 'completed') {
-            logInfo('Processing completed', { session: currentSession });
             clearInterval(statusCheckInterval);
             await loadResults();
         } else if (status.status === 'failed') {
@@ -601,15 +531,59 @@ async function checkStatus() {
         if (statusCheckFailureCount >= MAX_STATUS_FAILURES) {
             clearInterval(statusCheckInterval);
             showError(`Connection lost after ${MAX_STATUS_FAILURES} attempts. Please try refreshing the page.`);
-        } else {
-            // Just log the error but continue checking
-            logInfo(`Status check failed (${statusCheckFailureCount}/${MAX_STATUS_FAILURES}), retrying...`, {
-                session: currentSession,
-                error: error.message
-            });
         }
     }
 
+}
+
+// Show incremental results as pages complete
+function showIncrementalResults(status) {
+    // Show results section if not already visible
+    if (progressSection.classList.contains('hidden')) {
+        return; // Don't show if we're not in progress mode
+    }
+    
+    // Create or update incremental results container
+    let incrementalContainer = document.getElementById('incremental-results');
+    if (!incrementalContainer) {
+        incrementalContainer = document.createElement('div');
+        incrementalContainer.id = 'incremental-results';
+        incrementalContainer.className = 'incremental-results';
+        incrementalContainer.innerHTML = `
+            <h3>Extracted Text (Live Preview)</h3>
+            <div id="incremental-content" class="incremental-content"></div>
+        `;
+        
+        // Insert after progress section
+        const progressInfo = document.querySelector('.progress-info');
+        progressInfo.parentNode.insertBefore(incrementalContainer, progressInfo.nextSibling);
+    }
+    
+    const contentDiv = document.getElementById('incremental-content');
+    
+    // Build combined markdown from all completed pages
+    let combinedMarkdown = '';
+    const sortedResults = status.partial_results.sort((a, b) => a.page_number - b.page_number);
+    
+    for (const pageResult of sortedResults) {
+        if (pageResult.status === 'completed' && pageResult.text) {
+            combinedMarkdown += `\n\n---\n\n${pageResult.text}`;
+        }
+    }
+    
+    // Render markdown to HTML
+    if (combinedMarkdown.trim()) {
+        const html = marked.parse(combinedMarkdown);
+        contentDiv.innerHTML = html;
+        
+        // Highlight code blocks
+        contentDiv.querySelectorAll('pre code').forEach(block => {
+            hljs.highlightElement(block);
+        });
+        
+        // Scroll to bottom to show new content
+        contentDiv.scrollTop = contentDiv.scrollHeight;
+    }
 }
 
 // Load Results
@@ -626,8 +600,15 @@ async function loadResults() {
     }
 }
 
+
 // Display Results
 function displayResults() {
+    // Clean up incremental results when showing final results
+    const incrementalContainer = document.getElementById('incremental-results');
+    if (incrementalContainer) {
+        incrementalContainer.remove();
+    }
+    
     showSection('results');
     
     // Populate page selectors
@@ -640,6 +621,7 @@ function displayResults() {
     // Display metadata
     displayMetadata();
 }
+
 
 function populatePageSelectors() {
     pageSelect.innerHTML = '';
@@ -810,10 +792,13 @@ function resetToUpload() {
         clearInterval(statusCheckInterval);
     }
     
-    if (progressWebSocket) {
-        progressWebSocket.close();
-        progressWebSocket = null;
+    // Clean up incremental results
+    const incrementalContainer = document.getElementById('incremental-results');
+    if (incrementalContainer) {
+        incrementalContainer.remove();
     }
+    
+    // WebSocket cleanup removed - using polling only
     
     // Reset file input
     fileInput.value = '';
@@ -823,21 +808,10 @@ function resetToUpload() {
 }
 
 
-// Logging Functions (placeholders - replace with actual logging implementation)
-function logInfo(message, context = {}) {
-    console.log('[INFO]', message, context);
-}
 
+// Logging Functions - only log errors in client
 function logError(message, context = {}) {
     console.error('[ERROR]', message, context);
-}
-
-function logDebug(message, context = {}) {
-    console.debug('[DEBUG]', message, context);
-}
-
-function logStatus(session, event, data = {}) {
-    console.log('[STATUS]', session, event, data);
 }
 
 // Initialize on page load

@@ -19,10 +19,16 @@ os.environ['HF_DATASETS_CACHE'] = os.environ.get('MODEL_CACHE_PATH', '/app/cache
 import io
 import gc
 import torch
+
+# PyTorch compatibility fix for torch.compiler.is_compiling error
+if not hasattr(torch.compiler, 'is_compiling'):
+    torch.compiler.is_compiling = lambda: False
 import base64
 import traceback
 import threading
 import uuid
+import asyncio
+import json
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional, Union
 from datetime import datetime
@@ -53,9 +59,15 @@ class OCRService:
         self.job_queue = []  # Queue for when model not ready
         self.executor = ThreadPoolExecutor(max_workers=2)
         
-        # Start background loading immediately (docext pattern)
-        logger.info("OCR Service initializing with background model loading...")
-        threading.Thread(target=self._background_load, daemon=True).start()
+        # Model loading strategy based on environment
+        if os.environ.get('RUNNING_IN_CLOUD') == 'true':
+            # Cloud Run: Eager loading to prevent blocking HTTP requests during processing
+            logger.info("OCR Service initialized for cloud - starting background model loading to prevent blocking")
+            threading.Thread(target=self._background_load, daemon=True).start()
+        else:
+            # Local: Eager loading in background thread for immediate availability
+            logger.info("OCR Service initialized for local - starting background model loading")
+            threading.Thread(target=self._background_load, daemon=True).start()
 
     def _background_load(self):
         """Background model loading with job queue processing"""
@@ -105,7 +117,25 @@ class OCRService:
             logger.info("Starting offline model load process...")
             self._download_progress = {"status": "loading", "progress": 0, "message": "Checking local cache..."}
             
-            # Set device
+            # Set device - debug NVIDIA/CUDA detection
+            logger.info(f"CUDA available: {torch.cuda.is_available()}")
+            logger.info(f"Settings device: {settings.device}")
+            logger.info(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}")
+            logger.info(f"PyTorch version: {torch.__version__}")
+            logger.info(f"PyTorch CUDA compiled version: {torch.version.cuda}")
+            
+            # Check nvidia-smi equivalent
+            try:
+                import subprocess
+                result = subprocess.run(['nvidia-smi'], capture_output=True, text=True, timeout=10)
+                logger.info(f"nvidia-smi exit code: {result.returncode}")
+                if result.stdout:
+                    logger.info(f"nvidia-smi output: {result.stdout[:500]}")
+                if result.stderr:
+                    logger.info(f"nvidia-smi stderr: {result.stderr[:200]}")
+            except Exception as e:
+                logger.info(f"nvidia-smi failed: {e}")
+            
             if torch.cuda.is_available() and settings.device == "cuda":
                 self.device = torch.device("cuda")
                 logger.info(f"Using GPU: {torch.cuda.get_device_name(0)}")
@@ -199,6 +229,7 @@ class OCRService:
                 "trust_remote_code": True,  # Need this for Nanonets model
                 "force_download": False,  # Don't re-download if cache exists
                 "resume_download": False,  # Don't resume partial downloads
+                "use_fast": True,  # Use fast image processor for better performance
                 "min_pixels": 256 * 28 * 28,  # ~200K pixels - memory optimization
                 "max_pixels": 1280 * 28 * 28   # ~1M pixels - prevent memory explosion
             }
@@ -324,22 +355,46 @@ class OCRService:
             raise
 
     
-    def process_image(self, image: Union[Image.Image, np.ndarray]) -> Dict[str, Any]:
-        """Process a single image and extract text"""
+    async def process_image_async(self, image: Union[Image.Image, np.ndarray]) -> Dict[str, Any]:
+        """Process a single image and extract text asynchronously"""
+        import asyncio
+        
         try:
             if not self._model_loaded:
                 if self._loading:
-                    # Wait for background loading to complete
-                    import time
+                    # Wait for background loading to complete using async sleep
                     logger.info("⏳ Model still loading in background, waiting for completion...")
                     while self._loading and not self._model_loaded:
-                        time.sleep(1)
+                        await asyncio.sleep(0.1)  # Non-blocking sleep
                     if not self._model_loaded:
                         raise RuntimeError("Model loading failed")
                     logger.info("✅ Background model loading completed, proceeding with image processing")
                 else:
-                    raise RuntimeError("Model not loaded and not loading")
+                    # For cloud environments, start loading now when inference is needed
+                    if os.environ.get('RUNNING_IN_CLOUD') == 'true':
+                        logger.info("🔄 Starting model loading for cloud inference...")
+                        threading.Thread(target=self._background_load, daemon=True).start()
+                        # Wait for loading to complete with async sleep
+                        while self._loading and not self._model_loaded:
+                            await asyncio.sleep(0.1)  # Non-blocking sleep
+                        if not self._model_loaded:
+                            raise RuntimeError("Model loading failed")
+                    else:
+                        raise RuntimeError("Model not loaded and not loading")
             
+            # Run the CPU/GPU intensive OCR processing in a separate thread
+            # This prevents blocking the main HTTP thread
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(self.executor, self._process_image_sync, image)
+            return result
+            
+        except Exception as e:
+            logger.error(f"OCR processing failed: {str(e)}")
+            raise
+    
+    def _process_image_sync(self, image: Union[Image.Image, np.ndarray]) -> Dict[str, Any]:
+        """Synchronous OCR processing - runs in thread pool"""
+        try:
             # Convert numpy array to PIL Image if needed
             if isinstance(image, np.ndarray):
                 image = Image.fromarray(image)
@@ -362,9 +417,12 @@ class OCRService:
             text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             inputs = self.processor(text=[text], images=[image], padding=True, return_tensors="pt")
             
-            # Move to device if needed (should be minimal with device_map optimization)
-            if hasattr(self.model, 'device') and self.model.device != self.device:
+            # Move inputs to GPU if model is on GPU
+            if self.device.type == "cuda":
+                logger.info(f"Moving inputs to GPU device: {self.device}")
                 inputs = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+            else:
+                logger.info("Model on CPU, keeping inputs on CPU")
 
 
             
@@ -391,10 +449,15 @@ class OCRService:
             logger.info("🔍 Decoding generated tokens...")
             generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
             
+            # Debug: Log raw generated text before cleaning (using ERROR level to guarantee visibility)
+            logger.error(f"[DEBUG] Raw generated text length: {len(generated_text)}")
+            logger.error(f"[DEBUG] Raw text preview: {generated_text[:200]}")
+            
             # Strip the chat template from the output
             # The model outputs the entire conversation, we only want the assistant's response
             if "assistant\n" in generated_text:
                 generated_text = generated_text.split("assistant\n", 1)[1]
+                logger.info(f"🔍 After assistant split (first 200 chars): {generated_text[:200]}")
             
             # Remove any remaining system/user prompts that might have leaked through
             lines = generated_text.split('\n')
@@ -403,6 +466,16 @@ class OCRService:
                 if line.strip() and not line.startswith('system') and not line.startswith('user') and not line.startswith('assistant'):
                     cleaned_lines.append(line)
             generated_text = '\n'.join(cleaned_lines)
+            
+            # Debug: Check if cleaning removed everything
+            logger.error(f"[DEBUG] After cleaning, text length: {len(generated_text.strip())}")
+            if not generated_text.strip():
+                logger.error("[DEBUG] CRITICAL: Text cleaning resulted in empty content!")
+                logger.warning("🚨 Text cleaning resulted in empty content! Using raw output.")
+                # Fallback to less aggressive cleaning
+                generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+                if "assistant\n" in generated_text:
+                    generated_text = generated_text.split("assistant\n", 1)[1]
             
             # Log extraction results
             text_length = len(generated_text)
@@ -421,16 +494,27 @@ class OCRService:
             logger.error(f"Error processing image: {str(e)}")
             raise
     
-    def process_pdf(self, pdf_content: bytes, progress_callback=None) -> List[Dict[str, Any]]:
-        """Process a PDF file and extract text from all pages"""
+    def process_image(self, image: Union[Image.Image, np.ndarray]) -> Dict[str, Any]:
+        """Synchronous compatibility method for existing code"""
+        import asyncio
+        try:
+            # Run the async version in a new event loop if we're not in one
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(self.process_image_async(image))
+        except RuntimeError:
+            # If no event loop is running, create a new one
+            return asyncio.run(self.process_image_async(image))
+    
+    async def process_pdf_async(self, pdf_content: bytes, progress_callback=None) -> List[Dict[str, Any]]:
+        """Process a PDF file and extract text from all pages asynchronously"""
+        import asyncio
         try:
             if not self._model_loaded:
                 if self._loading:
-                    # Wait for background loading to complete
-                    import time
+                    # Wait for background loading to complete with async sleep
                     logger.info("⏳ Model still loading in background, waiting for completion...")
                     while self._loading and not self._model_loaded:
-                        time.sleep(1)
+                        await asyncio.sleep(0.1)  # Non-blocking sleep
                     if not self._model_loaded:
                         raise RuntimeError("Model loading failed")
                     logger.info("✅ Background model loading completed, proceeding with PDF processing")
@@ -455,7 +539,6 @@ class OCRService:
                 
                 # Update progress BEFORE processing
                 if progress_callback:
-                    import asyncio
                     if asyncio.iscoroutinefunction(progress_callback):
                         # Run async callback in thread-safe way
                         loop = asyncio.get_event_loop()
@@ -465,10 +548,11 @@ class OCRService:
                 
                 logger.info(f"🔍 Processing page {current_page}/{total_pages}")
                 
-                # Process each page
-                page_result = self.process_image(image)
+                # Process each page using async method
+                page_result = await self.process_image_async(image)
                 page_result["page_number"] = current_page
                 results.append(page_result)
+
                 
                 logger.info(f"✅ Completed page {current_page}/{total_pages}")
                 
@@ -481,6 +565,17 @@ class OCRService:
         except Exception as e:
             logger.error(f"Error processing PDF: {str(e)}")
             raise
+    
+    def process_pdf(self, pdf_content: bytes, progress_callback=None) -> List[Dict[str, Any]]:
+        """Synchronous compatibility method for existing code"""
+        import asyncio
+        try:
+            # Run the async version in a new event loop if we're not in one
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(self.process_pdf_async(pdf_content, progress_callback))
+        except RuntimeError:
+            # If no event loop is running, create a new one
+            return asyncio.run(self.process_pdf_async(pdf_content, progress_callback))
     
     def is_ready(self) -> bool:
         """Check if the model is loaded and ready"""
@@ -504,6 +599,85 @@ class OCRService:
         if self.device and self.device.type == "cuda":
             torch.cuda.empty_cache()
         gc.collect()
+
+    def _extract_images_from_raw_file(self, raw_filename, session_id, file_type, job, job_id):
+        """Extract images from raw PDF file in background thread"""
+        try:
+            from app.storage_service import StorageService
+            storage_service = StorageService(user_email=job.get('user_email'))
+            
+            # Update job progress
+            job['progress'] = {
+                "current_step": "extracting",
+                "message": "Extracting images from PDF...",
+                "percent": 10
+            }
+            self._update_job_status_gcs(job_id, 'processing', 'Extracting images from PDF...')
+            
+            # Load raw file from storage
+            raw_file_data = asyncio.run(storage_service.get_file(raw_filename, session_id))
+            
+            if file_type == "pdf":
+                import pdf2image
+                import io
+                
+                logger.info(f"Converting PDF to images for session {session_id}")
+                
+                # Update progress
+                job['progress']['message'] = "Converting PDF to images..."
+                job['progress']['percent'] = 20
+                self._update_job_status_gcs(job_id, 'processing', 'Converting PDF to images...')
+                
+                # Convert PDF to images
+                images = pdf2image.convert_from_bytes(
+                    raw_file_data,
+                    dpi=150,
+                    fmt='PNG',
+                    thread_count=2
+                )
+                
+                page_count = len(images)
+                logger.info(f"Extracted {page_count} pages from PDF")
+                
+                # Update progress
+                job['progress']['message'] = f"Saving {page_count} page images..."
+                job['progress']['percent'] = 30
+                self._update_job_status_gcs(job_id, 'processing', f'Saving {page_count} page images...')
+                
+                page_images = []
+                for i, image in enumerate(images):
+                    image_filename = f"page_{i+1:03d}.png"
+                    
+                    # Convert PIL image to bytes
+                    img_buffer = io.BytesIO()
+                    image.save(img_buffer, format='PNG')
+                    image_bytes = img_buffer.getvalue()
+                    
+                    # Save image to storage
+                    asyncio.run(storage_service.save_file(image_bytes, image_filename, session_id))
+                    page_images.append(image_filename)
+                    
+                    # Update progress incrementally
+                    progress = 30 + (i + 1) / page_count * 20  # 30-50%
+                    job['progress']['percent'] = progress
+                    job['progress']['message'] = f"Saved image {i+1}/{page_count}"
+                    
+                    # Update status every 10 pages to avoid too many updates
+                    if i % 10 == 0 or i == page_count - 1:
+                        self._update_job_status_gcs(job_id, 'processing', f'Saved image {i+1}/{page_count}')
+                
+                return page_images
+            else:
+                # For single images, save as page_001
+                image_filename = f"page_001.png"
+                asyncio.run(storage_service.save_file(raw_file_data, image_filename, session_id))
+                return [image_filename]
+                
+        except Exception as e:
+            logger.error(f"Failed to extract images from {raw_filename}: {e}")
+            job['status'] = 'failed'
+            job['error'] = f"Failed to extract images: {str(e)}"
+            raise
 
     async def cleanup(self):
         """Cleanup method for graceful shutdown"""
@@ -533,8 +707,8 @@ class OCRService:
         except Exception as e:
             logger.error("Error during OCR service cleanup", error=str(e), exc_info=True)
 
-    def submit_job(self, image_data, job_type="image", user_email=None):
-        """Submit OCR job, return job ID immediately"""
+    def submit_job(self, file_reference, job_type="image", user_email=None, session_id=None):
+        """Submit OCR job with file reference instead of binary data"""
         from datetime import datetime
         # Import here to avoid circular imports
         from app.storage_service import StorageService
@@ -542,20 +716,22 @@ class OCRService:
         
         job_id = str(uuid.uuid4())
         
-        # Create job record
+        # Create job record with file reference
         job_data = {
-            "status": "queued",
+            "status": "pending",
             "type": job_type,
-            "data": image_data,
+            "file_reference": file_reference,  # Store file reference instead of binary data
             "user_email": user_email,  # Store user context
+            "session_id": session_id,  # Store session context
             "created": datetime.utcnow().isoformat(),
             "result": None,
             "error": None,
+            "partial_results": [],  # NEW: Track completed pages incrementally
             "progress": {
                 "current_step": "queued",
                 "message": "Job queued, waiting for model to be ready",
                 "current_page": 0,
-                "total_pages": 0,
+                "total_pages": file_reference.get("page_count", 1) if isinstance(file_reference, dict) else 1,
                 "percent": 0
             }
         }
@@ -568,28 +744,39 @@ class OCRService:
             # Create storage service with user context
             storage_service = StorageService(user_email=user_email)
 
+            # Only persist to GCS in cloud mode
             if os.environ.get('RUNNING_IN_CLOUD') == 'true':
                 storage_service.force_cloud_mode()
+                
+                # Save job metadata to GCS using job_id as session_hash
+                
+                # Calculate file size from file_reference if available
+                file_size = 0
+                if isinstance(file_reference, dict) and 'page_count' in file_reference:
+                    file_size = file_reference.get('page_count', 0) * 1024  # Rough estimate
+                
+                job_metadata = {
+                    'job_id': job_id,
+                    'job_type': job_type,
+                    'status': 'queued',
+                    'created_at': datetime.utcnow().isoformat(),
+                    'file_size': file_size
+                }
             
-            # Save job metadata to GCS using job_id as session_hash
-            import asyncio
-            import json
-            
-            job_metadata = {
-                'job_id': job_id,
-                'job_type': job_type,
-                'status': 'queued',
-                'created_at': datetime.utcnow().isoformat(),
-                'file_size': len(image_data) if image_data else 0
-            }
-            
-            # Create session and save metadata synchronously 
+            # Use existing session_id or create new one
             # (this runs in main thread, not ThreadPoolExecutor)
             try:
                 loop = asyncio.get_event_loop()
-                session_task = loop.create_task(storage_service.create_session(job_metadata, session_hash=job_id))
                 
-                # Save initial status
+                if session_id:
+                    # Use existing session from upload
+                    used_session_id = session_id
+                else:
+                    # Create new session if none provided
+                    session_task = loop.create_task(storage_service.create_session(job_metadata, session_hash=job_id))
+                    used_session_id = job_id
+                
+                # Save initial status to the session
                 status_data = {
                     'status': 'queued',
                     'progress': 0.0,
@@ -599,8 +786,9 @@ class OCRService:
                 status_task = loop.create_task(storage_service.save_file(
                     json.dumps(status_data, indent=2).encode('utf-8'),
                     'status.json',
-                    job_id
+                    used_session_id
                 ))
+
             except RuntimeError:
                 # If no event loop in this thread, skip GCS persistence for now
                 logger.warning(f"No event loop available for job {job_id} GCS persistence")
@@ -619,10 +807,18 @@ class OCRService:
                 self.job_queue.append(job_id)
                 logger.info(f"📋 Job {job_id} queued - model still loading")
             else:
-                # Model failed to load
-                job_data["status"] = "failed"
-                job_data["error"] = "Model failed to load"
-                logger.error(f"❌ Job {job_id} failed - model not loaded")
+                # For cloud environments, start loading now when job submitted
+                if os.environ.get('RUNNING_IN_CLOUD') == 'true':
+                    logger.info(f"🔄 Starting model loading for cloud job {job_id}...")
+                    threading.Thread(target=self._background_load, daemon=True).start()
+                    # Queue the job until model ready
+                    self.job_queue.append(job_id)
+                    logger.info(f"📋 Job {job_id} queued - model loading started")
+                else:
+                    # Model failed to load
+                    job_data["status"] = "failed"
+                    job_data["error"] = "Model failed to load"
+                    logger.error(f"❌ Job {job_id} failed - model not loaded")
         else:
             # Process immediately if model ready
             self.process_job_async(job_id)
@@ -642,9 +838,32 @@ class OCRService:
                 self._update_job_status_gcs(job_id, 'processing', 'Starting OCR processing...')
 
                 
-                file_data = job['data']
+                # Handle file reference - check if we need to extract images
+                file_reference = job['file_reference']
+                session_id = file_reference['session_id']
+                
+                # Check if we have pre-extracted page images or need to extract from raw file
+                if 'page_images' in file_reference:
+                    page_images = file_reference['page_images']
+                elif 'raw_file' in file_reference:
+                    # Extract images from raw file in background
+                    logger.info(f"Extracting images from raw file: {file_reference['raw_file']}")
+                    page_images = self._extract_images_from_raw_file(
+                        file_reference['raw_file'], 
+                        session_id, 
+                        file_reference['file_type'],
+                        job,
+                        job_id
+                    )
+                else:
+                    raise RuntimeError("No page images or raw file found in file reference")
+                
+                # Initialize storage service
+                from app.storage_service import StorageService
+                storage_service = StorageService(user_email=job.get('user_email'))
+                
                 if job['type'] == "image":
-                    # Update progress for image processing
+                    # Single image processing
                     job['progress'] = {
                         "current_step": "processing",
                         "message": "Processing image...",
@@ -653,20 +872,51 @@ class OCRService:
                         "percent": 50
                     }
                     
+                    # Load image from storage
+                    image_filename = page_images[0]
+                    image_data = asyncio.run(storage_service.get_file(image_filename, session_id))
+                    
                     from PIL import Image
                     import io
-                    image = Image.open(io.BytesIO(file_data))
-                    result = self.process_image(image)
+                    image = Image.open(io.BytesIO(image_data))
+                    page_result = self.process_image(image)
+                    page_result["page_number"] = 1
+                    result = [page_result]
+                    
+                    # NEW: Add completed image to partial_results immediately
+                    partial_page = {
+                        "page_number": 1,
+                        "text": page_result.get("text", ""),
+                        "status": "completed",
+                        "confidence": page_result.get("confidence", 0.95),
+                        "processing_time": page_result.get("processing_time", 0),
+                        "completed_at": datetime.utcnow().isoformat()
+                    }
+                    
+                    job['partial_results'].append(partial_page)
+                    
+                    # Update progress with partial results
+                    self._update_job_status_gcs(job_id, 'processing', 'Image processing completed')
+                    
+                    logger.info("✅ Single image completed and added to partial results")
                     
                 elif job['type'] == "pdf":
-                    # Update progress for PDF processing
+                    # PDF images already extracted during upload, load from storage
+                    total_pages = len(page_images)
                     job['progress'] = {
-                        "current_step": "converting",
-                        "message": "Converting PDF to images...",
+                        "current_step": "processing",
+                        "message": f"Processing {total_pages} pages...",
                         "current_page": 0,
-                        "total_pages": 0,
+                        "total_pages": total_pages,
                         "percent": 10
                     }
+                    
+                    logger.info(f"Loading {total_pages} pre-extracted images from storage")
+                    
+                    # Process images already extracted and saved during upload
+                    result = []
+                    from PIL import Image
+                    import io
                     
                     # Create progress callback to update job status
                     def progress_callback(current_page, total_pages):
@@ -679,7 +929,42 @@ class OCRService:
                             "percent": percent
                         }
                     
-                    result = self.process_pdf(file_data, progress_callback=progress_callback)
+                    for i, image_filename in enumerate(page_images):
+                        current_page = i + 1
+                        progress_callback(current_page, total_pages)
+                        
+                        logger.info(f"🔍 Processing page {current_page}/{total_pages} - {image_filename}")
+                        
+                        # Load image from storage
+                        image_data = asyncio.run(storage_service.get_file(image_filename, session_id))
+                        image = Image.open(io.BytesIO(image_data))
+                        
+                        # Process the loaded image
+                        page_result = self.process_image(image)
+                        page_result["page_number"] = current_page
+                        result.append(page_result)
+                        
+                        # NEW: Add completed page to partial_results immediately
+                        partial_page = {
+                            "page_number": current_page,
+                            "text": page_result.get("text", ""),
+                            "status": "completed",
+                            "confidence": page_result.get("confidence", 0.95),
+                            "processing_time": page_result.get("processing_time", 0),
+                            "completed_at": datetime.utcnow().isoformat()
+                        }
+                        
+                        job['partial_results'].append(partial_page)
+                        
+                        # Update progress with partial results and persist to GCS
+                        self._update_job_status_gcs(job_id, 'processing', f'Completed page {current_page} of {total_pages}')
+                        
+                        logger.info(f"✅ Page {current_page}/{total_pages} completed and added to partial results")
+                        
+                        # Clear GPU memory after each page
+                        if self.device.type == "cuda":
+                            torch.cuda.empty_cache()
+
                     
                 else:
                     raise ValueError(f"Unknown job type: {job['type']}")
@@ -699,6 +984,64 @@ class OCRService:
                 
                 # Update GCS with completion status
                 self._update_job_status_gcs(job_id, 'completed', 'Processing complete!')
+                
+                # CRITICAL: Save the actual OCR results to storage
+                try:
+                    from app.storage_service import StorageService
+                    
+                    # Get job context
+                    user_email = job.get('user_email')
+                    session_id = job.get('session_id', job_id)
+                    
+                    # Create storage service
+                    storage_service = StorageService(user_email=user_email)
+                    if os.environ.get('RUNNING_IN_CLOUD') == 'true':
+                        storage_service.force_cloud_mode()
+                    
+                    # Create new event loop for this thread
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    
+                    try:
+                        if job['type'] == "image":
+                            # Save single image result
+                            text_content = result.get('text', '')
+                            loop.run_until_complete(storage_service.save_page_result(
+                                session_id, 1, text_content
+                            ))
+                            # Also save as combined output
+                            loop.run_until_complete(storage_service.save_combined_result(
+                                session_id, text_content
+                            ))
+                            logger.info(f"📝 Saved image OCR results to storage for session {session_id}")
+                            
+                        elif job['type'] == "pdf":
+                            # Save individual page results and combined output
+                            combined_text = []
+                            for i, page_result in enumerate(result):
+                                page_num = i + 1
+                                text_content = page_result.get('text', '')
+                                # Save individual page
+                                loop.run_until_complete(storage_service.save_page_result(
+                                    session_id, page_num, text_content
+                                ))
+                                # Add to combined with page marker
+                                combined_text.append(f"--- Page {page_num} ---\n{text_content}\n")
+                            
+                            # Save combined markdown
+                            combined_markdown = '\n'.join(combined_text)
+                            loop.run_until_complete(storage_service.save_combined_result(
+                                session_id, combined_markdown
+                            ))
+                            logger.info(f"📝 Saved PDF OCR results ({len(result)} pages) to storage for session {session_id}")
+                            
+                    finally:
+                        loop.close()
+                        
+                except Exception as e:
+                    logger.error(f"⚠️ Failed to save OCR results to storage: {e}")
+                    # Don't fail the job, just log the error
+
 
                 
             except Exception as e:
@@ -724,12 +1067,11 @@ class OCRService:
         try:
             from app.storage_service import StorageService
             from datetime import datetime
-            import asyncio
-            import json
             
-            # Get job data to extract user context
+            # Get job data to extract user and session context
             job = self.jobs.get(job_id, {})
-            user_email = job.get('user_email')  # We'll need to store this in job data
+            user_email = job.get('user_email')
+            session_id = job.get('session_id', job_id)  # Use session_id if available, fallback to job_id
             
             # Create storage service with user context
             storage_service = StorageService(user_email=user_email)
@@ -738,7 +1080,6 @@ class OCRService:
                 storage_service.force_cloud_mode()
             
             # Get current job data for progress info
-            job = self.jobs.get(job_id, {})
             progress_data = job.get('progress', {})
             
             # Create status update
@@ -748,22 +1089,23 @@ class OCRService:
                 'current_page': progress_data.get('current_page', 0),
                 'total_pages': progress_data.get('total_pages', 0),
                 'message': message,
+                'partial_results': job.get('partial_results', []),  # NEW: Include partial results
                 'updated_at': datetime.utcnow().isoformat()
             }
             
-            # Save to GCS synchronously from background thread
-            import asyncio
+            # Save to session directory (not job_id directory)
             try:
                 # Create new event loop for this thread
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 
-                # Run the save operation
+                # Run the save operation using session_id
                 loop.run_until_complete(storage_service.save_file(
                     json.dumps(status_data, indent=2).encode('utf-8'),
                     'status.json',
-                    job_id
+                    session_id
                 ))
+
             finally:
                 # Clean up the loop
                 try:
@@ -781,13 +1123,28 @@ class OCRService:
         """Get job result by ID - check memory first, then GCS"""
         # First check in-memory jobs
         if job_id in self.jobs:
-            return self.jobs[job_id]
+            job_data = self.jobs[job_id]
+            
+            # Include partial results in status response
+            status_response = {
+                "status": job_data.get("status"),
+                "type": job_data.get("type"),
+                "file_reference": job_data.get("file_reference"),
+                "user_email": job_data.get("user_email"),
+                "session_id": job_data.get("session_id"),
+                "created": job_data.get("created"),
+                "result": job_data.get("result"),  # Full results when complete
+                "error": job_data.get("error"),
+                "progress": job_data.get("progress"),
+                "partial_results": job_data.get("partial_results", []),  # NEW: Incremental results
+                "completed": job_data.get("completed")
+            }
+            
+            return status_response
         
         # If not in memory, try to load from GCS (container restart recovery)
         try:
             from app.storage_service import StorageService
-            import asyncio
-            import json
             
             # Try to load job status from GCS
             storage_service = StorageService(user_email=None)  # Anonymous fallback
@@ -825,7 +1182,8 @@ class OCRService:
                     },
                     "result": None,  # Result would need separate recovery
                     "created": "unknown",
-                    "type": "unknown"
+                    "type": "unknown",
+                    "partial_results": status_data.get('partial_results', [])  # NEW: Include partial results from storage
                 }
                 
                 return recovered_job
