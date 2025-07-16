@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     gcs_bucket_name: str = Field(default="gnosis-ocr-storage", env="GCS_BUCKET_NAME")
     model_bucket_name: str = Field(default="gnosis-ocr-models", env="MODEL_BUCKET_NAME")
     
+    # Cloud Tasks Configuration
+    cloud_tasks_project: str = Field(default="gnosis-459403", env="CLOUD_TASKS_PROJECT")
+    cloud_tasks_location: str = Field(default="us-central1", env="CLOUD_TASKS_LOCATION")
+    cloud_tasks_queue: str = Field(default="ocr-processing", env="CLOUD_TASKS_QUEUE")
+    worker_service_url: str = Field(default="", env="WORKER_SERVICE_URL")
+    
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
 

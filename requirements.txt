@@ -41,3 +41,4 @@ httpx==0.26.0
 
 # Cloud storage - required for storage service
 google-cloud-storage==2.14.0
+google-cloud-tasks==2.16.4

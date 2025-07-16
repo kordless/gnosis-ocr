@@ -378,7 +378,7 @@ class StorageService:
         session_hash = str(uuid.uuid4())
         
         logger.info(f"Creating session {session_hash} for user {self._user_email} (hash: {self._user_hash}, cloud: {self._is_cloud})")
-        
+        logger.info("confirming we're running new code")
         # Create session metadata
         metadata = {
             'session_id': session_hash,
