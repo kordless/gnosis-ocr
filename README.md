@@ -157,9 +157,9 @@ graph TD
 docker-compose up --build
 ```
 
-### Staging Environment
+### Local Dev Environment
 ```powershell
-./scripts/deploy.ps1 -Target staging
+./scripts/deploy.ps1 -Target local
 ```
 
 ### Production (Cloud Run)
