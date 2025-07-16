@@ -435,11 +435,11 @@ async def process_ocr_batch(request: ProcessBatchRequest):
                 # Load image from storage
                 image_data = await storage_service.get_file(image_filename, request.session_id)
                 
-                # Process OCR using the existing OCR service
+                # Process OCR using the async OCR service
                 from PIL import Image
                 import io
                 image = Image.open(io.BytesIO(image_data))
-                result = ocr_service.process_image(image)
+                result = await ocr_service.process_image_async(image)
                 
                 # Save result to storage
                 result_filename = f'page_{page_num:03d}_result.txt'
@@ -1010,8 +1010,9 @@ async def upload_job_chunk(upload_id: str, file: UploadFile = File(...), request
                     # Load image to check dimensions
                     image = Image.open(io.BytesIO(complete_file_data))
                     width, height = image.size
-                    max_height = 1024
+                    max_height = 1754  # Use PDF page height at 150 DPI (standard US Letter height)
                     overlap = 100  # 100 pixel overlap between slices
+
                     
                     page_images = []
                     
@@ -1073,14 +1074,22 @@ async def upload_job_chunk(upload_id: str, file: UploadFile = File(...), request
                     }
                     logger.info(f"Image file ready for immediate processing: {len(page_images)} parts")
                 else:
-                    # For PDFs: keep raw file reference for extraction
+                    # For PDFs: get page count and keep raw file reference for extraction
+                    import pdf2image
+                    import io
+                    
+                    # Get PDF page count
+                    pdf_pages = pdf2image.convert_from_bytes(complete_file_data, first_page=1, last_page=1)
+                    page_count = len(pdf2image.convert_from_bytes(complete_file_data, dpi=1, fmt='JPEG'))
+                    
                     file_reference = {
                         "session_id": session_id,
                         "filename": filename,
                         "file_type": job_type,
-                        "raw_file": filename
+                        "raw_file": filename,
+                        "page_count": page_count
                     }
-                    logger.info(f"PDF file ready for extraction: {filename}")
+                    logger.info(f"PDF file ready for extraction: {filename} ({page_count} pages)")
                 
                 # Submit job based on environment
                 if os.environ.get('RUNNING_IN_CLOUD') == 'true':
@@ -1195,14 +1204,22 @@ async def upload_job_chunk(upload_id: str, file: UploadFile = File(...), request
                     }
                     logger.info(f"Image file ready for immediate processing: {image_filename}")
                 else:
-                    # For PDFs: keep raw file reference for extraction
+                    # For PDFs: get page count and keep raw file reference for extraction
+                    import pdf2image
+                    import io
+                    
+                    # Get PDF page count
+                    pdf_pages = pdf2image.convert_from_bytes(complete_file_data, first_page=1, last_page=1)
+                    page_count = len(pdf2image.convert_from_bytes(complete_file_data, dpi=1, fmt='JPEG'))
+                    
                     file_reference = {
                         "session_id": session_id,
                         "filename": filename,
                         "file_type": job_type,
-                        "raw_file": filename
+                        "raw_file": filename,
+                        "page_count": page_count
                     }
-                    logger.info(f"PDF file ready for extraction: {filename}")
+                    logger.info(f"PDF file ready for extraction: {filename} ({page_count} pages)")
                 
                 # Local mode: Use existing ThreadPoolExecutor - submit immediately
                 job_id = ocr_service.submit_job(file_reference, job_type=job_type, user_email=user_email, session_id=session_id)

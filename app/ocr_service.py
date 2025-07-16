@@ -19,6 +19,10 @@ os.environ['HF_DATASETS_CACHE'] = os.environ.get('MODEL_CACHE_PATH', '/app/cache
 import io
 import gc
 import torch
+
+# PyTorch compatibility fix for torch.compiler.is_compiling error
+if not hasattr(torch.compiler, 'is_compiling'):
+    torch.compiler.is_compiling = lambda: False
 import base64
 import traceback
 import threading
@@ -57,8 +61,9 @@ class OCRService:
         
         # Model loading strategy based on environment
         if os.environ.get('RUNNING_IN_CLOUD') == 'true':
-            # Cloud Run: Lazy loading to avoid memory issues during uploads
-            logger.info("OCR Service initialized for cloud - model will load when first job is processed")
+            # Cloud Run: Eager loading to prevent blocking HTTP requests during processing
+            logger.info("OCR Service initialized for cloud - starting background model loading to prevent blocking")
+            threading.Thread(target=self._background_load, daemon=True).start()
         else:
             # Local: Eager loading in background thread for immediate availability
             logger.info("OCR Service initialized for local - starting background model loading")
@@ -350,16 +355,17 @@ class OCRService:
             raise
 
     
-    def process_image(self, image: Union[Image.Image, np.ndarray]) -> Dict[str, Any]:
-        """Process a single image and extract text"""
-        import time  # Import at function start to avoid scope issues
+    async def process_image_async(self, image: Union[Image.Image, np.ndarray]) -> Dict[str, Any]:
+        """Process a single image and extract text asynchronously"""
+        import asyncio
+        
         try:
             if not self._model_loaded:
                 if self._loading:
-                    # Wait for background loading to complete
+                    # Wait for background loading to complete using async sleep
                     logger.info("⏳ Model still loading in background, waiting for completion...")
                     while self._loading and not self._model_loaded:
-                        time.sleep(1)
+                        await asyncio.sleep(0.1)  # Non-blocking sleep
                     if not self._model_loaded:
                         raise RuntimeError("Model loading failed")
                     logger.info("✅ Background model loading completed, proceeding with image processing")
@@ -368,14 +374,27 @@ class OCRService:
                     if os.environ.get('RUNNING_IN_CLOUD') == 'true':
                         logger.info("🔄 Starting model loading for cloud inference...")
                         threading.Thread(target=self._background_load, daemon=True).start()
-                        # Wait for loading to complete
+                        # Wait for loading to complete with async sleep
                         while self._loading and not self._model_loaded:
-                            time.sleep(1)
+                            await asyncio.sleep(0.1)  # Non-blocking sleep
                         if not self._model_loaded:
                             raise RuntimeError("Model loading failed")
                     else:
                         raise RuntimeError("Model not loaded and not loading")
             
+            # Run the CPU/GPU intensive OCR processing in a separate thread
+            # This prevents blocking the main HTTP thread
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(self.executor, self._process_image_sync, image)
+            return result
+            
+        except Exception as e:
+            logger.error(f"OCR processing failed: {str(e)}")
+            raise
+    
+    def _process_image_sync(self, image: Union[Image.Image, np.ndarray]) -> Dict[str, Any]:
+        """Synchronous OCR processing - runs in thread pool"""
+        try:
             # Convert numpy array to PIL Image if needed
             if isinstance(image, np.ndarray):
                 image = Image.fromarray(image)
@@ -475,16 +494,27 @@ class OCRService:
             logger.error(f"Error processing image: {str(e)}")
             raise
     
-    def process_pdf(self, pdf_content: bytes, progress_callback=None) -> List[Dict[str, Any]]:
-        """Process a PDF file and extract text from all pages"""
-        import time  # Import at function start to avoid scope issues
+    def process_image(self, image: Union[Image.Image, np.ndarray]) -> Dict[str, Any]:
+        """Synchronous compatibility method for existing code"""
+        import asyncio
+        try:
+            # Run the async version in a new event loop if we're not in one
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(self.process_image_async(image))
+        except RuntimeError:
+            # If no event loop is running, create a new one
+            return asyncio.run(self.process_image_async(image))
+    
+    async def process_pdf_async(self, pdf_content: bytes, progress_callback=None) -> List[Dict[str, Any]]:
+        """Process a PDF file and extract text from all pages asynchronously"""
+        import asyncio
         try:
             if not self._model_loaded:
                 if self._loading:
-                    # Wait for background loading to complete
+                    # Wait for background loading to complete with async sleep
                     logger.info("⏳ Model still loading in background, waiting for completion...")
                     while self._loading and not self._model_loaded:
-                        time.sleep(1)
+                        await asyncio.sleep(0.1)  # Non-blocking sleep
                     if not self._model_loaded:
                         raise RuntimeError("Model loading failed")
                     logger.info("✅ Background model loading completed, proceeding with PDF processing")
@@ -518,8 +548,8 @@ class OCRService:
                 
                 logger.info(f"🔍 Processing page {current_page}/{total_pages}")
                 
-                # Process each page
-                page_result = self.process_image(image)
+                # Process each page using async method
+                page_result = await self.process_image_async(image)
                 page_result["page_number"] = current_page
                 results.append(page_result)
 
@@ -535,6 +565,17 @@ class OCRService:
         except Exception as e:
             logger.error(f"Error processing PDF: {str(e)}")
             raise
+    
+    def process_pdf(self, pdf_content: bytes, progress_callback=None) -> List[Dict[str, Any]]:
+        """Synchronous compatibility method for existing code"""
+        import asyncio
+        try:
+            # Run the async version in a new event loop if we're not in one
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(self.process_pdf_async(pdf_content, progress_callback))
+        except RuntimeError:
+            # If no event loop is running, create a new one
+            return asyncio.run(self.process_pdf_async(pdf_content, progress_callback))
     
     def is_ready(self) -> bool:
         """Check if the model is loaded and ready"""
@@ -677,7 +718,7 @@ class OCRService:
         
         # Create job record with file reference
         job_data = {
-            "status": "queued",
+            "status": "pending",
             "type": job_type,
             "file_reference": file_reference,  # Store file reference instead of binary data
             "user_email": user_email,  # Store user context
@@ -685,6 +726,7 @@ class OCRService:
             "created": datetime.utcnow().isoformat(),
             "result": None,
             "error": None,
+            "partial_results": [],  # NEW: Track completed pages incrementally
             "progress": {
                 "current_step": "queued",
                 "message": "Job queued, waiting for model to be ready",
@@ -837,7 +879,26 @@ class OCRService:
                     from PIL import Image
                     import io
                     image = Image.open(io.BytesIO(image_data))
-                    result = self.process_image(image)
+                    page_result = self.process_image(image)
+                    page_result["page_number"] = 1
+                    result = [page_result]
+                    
+                    # NEW: Add completed image to partial_results immediately
+                    partial_page = {
+                        "page_number": 1,
+                        "text": page_result.get("text", ""),
+                        "status": "completed",
+                        "confidence": page_result.get("confidence", 0.95),
+                        "processing_time": page_result.get("processing_time", 0),
+                        "completed_at": datetime.utcnow().isoformat()
+                    }
+                    
+                    job['partial_results'].append(partial_page)
+                    
+                    # Update progress with partial results
+                    self._update_job_status_gcs(job_id, 'processing', 'Image processing completed')
+                    
+                    logger.info("✅ Single image completed and added to partial results")
                     
                 elif job['type'] == "pdf":
                     # PDF images already extracted during upload, load from storage
@@ -882,6 +943,23 @@ class OCRService:
                         page_result = self.process_image(image)
                         page_result["page_number"] = current_page
                         result.append(page_result)
+                        
+                        # NEW: Add completed page to partial_results immediately
+                        partial_page = {
+                            "page_number": current_page,
+                            "text": page_result.get("text", ""),
+                            "status": "completed",
+                            "confidence": page_result.get("confidence", 0.95),
+                            "processing_time": page_result.get("processing_time", 0),
+                            "completed_at": datetime.utcnow().isoformat()
+                        }
+                        
+                        job['partial_results'].append(partial_page)
+                        
+                        # Update progress with partial results and persist to GCS
+                        self._update_job_status_gcs(job_id, 'processing', f'Completed page {current_page} of {total_pages}')
+                        
+                        logger.info(f"✅ Page {current_page}/{total_pages} completed and added to partial results")
                         
                         # Clear GPU memory after each page
                         if self.device.type == "cuda":
@@ -1011,6 +1089,7 @@ class OCRService:
                 'current_page': progress_data.get('current_page', 0),
                 'total_pages': progress_data.get('total_pages', 0),
                 'message': message,
+                'partial_results': job.get('partial_results', []),  # NEW: Include partial results
                 'updated_at': datetime.utcnow().isoformat()
             }
             
@@ -1044,7 +1123,24 @@ class OCRService:
         """Get job result by ID - check memory first, then GCS"""
         # First check in-memory jobs
         if job_id in self.jobs:
-            return self.jobs[job_id]
+            job_data = self.jobs[job_id]
+            
+            # Include partial results in status response
+            status_response = {
+                "status": job_data.get("status"),
+                "type": job_data.get("type"),
+                "file_reference": job_data.get("file_reference"),
+                "user_email": job_data.get("user_email"),
+                "session_id": job_data.get("session_id"),
+                "created": job_data.get("created"),
+                "result": job_data.get("result"),  # Full results when complete
+                "error": job_data.get("error"),
+                "progress": job_data.get("progress"),
+                "partial_results": job_data.get("partial_results", []),  # NEW: Incremental results
+                "completed": job_data.get("completed")
+            }
+            
+            return status_response
         
         # If not in memory, try to load from GCS (container restart recovery)
         try:
@@ -1086,7 +1182,8 @@ class OCRService:
                     },
                     "result": None,  # Result would need separate recovery
                     "created": "unknown",
-                    "type": "unknown"
+                    "type": "unknown",
+                    "partial_results": status_data.get('partial_results', [])  # NEW: Include partial results from storage
                 }
                 
                 return recovered_job
