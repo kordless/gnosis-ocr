@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  app:
+    # The image name is now 'gnosis-ocr'
+    image: gnosis-ocr:${TAG:-latest}
+    build:
+      context: .
+      # Points to the single unified Dockerfile
+      dockerfile: Dockerfile.unified
+    
+    # Exposes container port 8080 to host port 7799
+    ports:
+      - "7799:8080"
+
+    # Loads local environment variables from .env file
+    env_file:
+      - ./.env
+
+    volumes:
+      # Mount for development - hot reload (comment out for production)
+      - ./app:/app/app
+      # Docker volume for persistent data storage
+      - gnosis_ocr_storage:/app/storage
+      # Mount model cache from local directory
+      - ./model-cache:/app/cache
+
+    # GPU support for local development
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    healthcheck:
+      # Healthcheck now targets the internal port 8080
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+    restart: unless-stopped
+
+volumes:
+  gnosis_ocr_storage:
+    driver: local

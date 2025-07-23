@@ -1,0 +1,42 @@
+# Gnosis OCR Environment Configuration Example
+# Copy this file to .env for local development and .env.cloudrun for cloud deployment.
+
+# --- Core Service Settings ---
+# The internal port the application listens on. For local, docker-compose maps this to 7799.
+# For Cloud Run, this is set to 8080 by the deployment script.
+PORT=8080
+HOST=0.0.0.0
+LOG_LEVEL=INFO
+
+# Set to true in .env.cloudrun, false in .env
+RUNNING_IN_CLOUD=false
+
+# --- Model & Processing ---
+MODEL_NAME=nanonets/Nanonets-OCR-s
+
+# Set to 'cuda' for local GPU, 'cpu' or 'cuda' for cloud.
+DEVICE=cuda
+SESSION_TIMEOUT=3600 # in seconds
+
+# --- Local Docker Settings (used in .env) ---
+# For local GPU acceleration
+CUDA_VISIBLE_DEVICES=0
+STORAGE_PATH=/app/storage
+
+# --- Google Cloud Settings (used in .env.cloudrun) ---
+# GCP Project and Service Configuration
+PROJECT_ID=your-gcp-project-id
+GCP_SERVICE_ACCOUNT=your-service-account@your-gcp-project-id.iam.gserviceaccount.com
+
+# GCS Bucket Configuration
+GCS_BUCKET_NAME=your-gcs-storage-bucket-name
+MODEL_BUCKET_NAME=your-gcs-model-cache-bucket-name
+
+# HuggingFace Authentication (Optional, if using private models)
+# HF_TOKEN=your_hugging_face_token
+
+# --- Cache paths (Consistent across environments) ---
+HF_HOME=/app/cache
+MODEL_CACHE_PATH=/app/cache
+TRANSFORMERS_CACHE=/app/cache
+HF_DATASETS_CACHE=/app/cache

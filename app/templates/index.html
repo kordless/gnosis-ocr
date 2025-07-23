@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gnosis OCR-S | Document Processing</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <div class="logo">Gnosis OCR-S</div>
+                <div class="user-info">
+                    <span id="user-email">Anonymous User</span>
+                    <span id="session-count">0 sessions</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main">
+        <div class="container">
+            <!-- Upload Section -->
+            <section class="upload-section">
+                <h2 class="section-title">Upload Document</h2>
+                
+                <div class="upload-area" id="upload-area">
+                    <svg class="upload-icon" viewBox="0 0 24 24">
+                        <path d="M7 18C4.79086 18 3 16.2091 3 14C3 11.7909 4.79086 10 7 10C7.16649 10 7.33072 10.0106 7.49132 10.0312C8.10732 7.67051 10.3074 6 12.9091 6C16.0156 6 18.5455 8.46898 18.5455 11.5C18.5455 11.6671 18.5389 11.8327 18.526 11.9964C20.3962 12.2613 21.8182 13.8893 21.8182 15.8182C21.8182 17.9256 20.1074 19.6364 18 19.6364H7.72727M12 14V22M12 14L9 17M12 14L15 17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <p class="upload-text">Drag and drop your PDF or image here, or</p>
+                    <button class="upload-button" onclick="document.getElementById('file-input').click()">
+                        Choose File
+                    </button>
+                    <input type="file" id="file-input" accept=".pdf,.png,.jpg,.jpeg,.webp,.tiff">
+                    <p class="file-types">Supported: PDF, PNG, JPG, JPEG, WebP, TIFF</p>
+                </div>
+
+                <div class="upload-options">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="force-chunking">
+                        <span>Always use chunked upload</span>
+                    </label>
+                    <span class="upload-info">Files >20MB automatically use chunking</span>
+                </div>
+
+                <div class="upload-progress" id="upload-progress">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progress-fill"></div>
+                    </div>
+                    <p class="progress-text" id="progress-text">Uploading...</p>
+                </div>
+            </section>
+
+            <!-- Sessions Section -->
+            <section class="sessions-section">
+                <div class="section-header">
+                    <h2 class="section-title">Recent Sessions</h2>
+                    <button class="clear-sessions" onclick="clearAllSessions()">Clear All</button>
+                </div>
+                
+                <div id="session-list" class="session-list">
+                    <!-- Sessions will be dynamically added here -->
+                </div>
+                
+                <div id="empty-state" class="empty-state">
+                    <svg class="empty-icon" viewBox="0 0 24 24">
+                        <path d="M9 13H15M9 17H12M17 21H7C5.89543 21 5 20.1046 5 19V5C5 3.89543 5.89543 3 7 3H12.5858C12.851 3 13.1054 3.10536 13.2929 3.29289L18.7071 8.70711C18.8946 8.89464 19 9.149 19 9.41421V19C19 20.1046 18.1046 21 17 21Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+                    </svg>
+                    <p>No documents uploaded yet</p>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- Session Details Modal -->
+    <div class="modal" id="session-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title" id="modal-title">Session Details</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div id="modal-body">
+                <!-- Session details will be loaded here -->
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

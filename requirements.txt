@@ -1,0 +1,28 @@
+# Cloud deployment requirements
+# Includes all base requirements plus cloud-specific dependencies
+
+# Base requirements
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+jinja2>=3.1.2
+requests>=2.31.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+pdf2image>=1.16.3
+pillow>=10.0.0
+
+# OCR Model dependencies
+# Use the exact same transformers version as vLLM to avoid conflicts
+transformers>=4.48.0
+accelerate>=0.21.0
+pillow>=10.2.0
+numpy<2.0
+qwen-vl-utils>=0.0.5
+
+# Logging
+structlog>=24.1.0
+
+# Cloud dependencies (required for cloud deployment)
+google-cloud-tasks>=2.13.0
+google-cloud-storage>=2.10.0

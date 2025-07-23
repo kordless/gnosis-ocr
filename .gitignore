@@ -1,0 +1,172 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.ruff_cache/
+
+# Virtual environments
+bin/
+include/
+lib/
+lib64/
+share/
+pyvenv.cfg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+.DS_Store
+
+# Project specific
+data/
+.env
+.env.cloudrun
+*.log
+logs/
+build-logs/
+
+
+# OCR session data
+/tmp/ocr_sessions/
+ocr_sessions/
+*.pdf
+
+# Ignore images in most places, but allow documentation images
+*.png
+*.jpg
+*.jpeg
+!images/*.png
+!docs/images/*.png
+
+
+
+# Model cache (if stored locally)
+model-cache/
+model-cache/*
+.cache/
+
+# Claude specific
+.claude/
+CLAUDE.md.backup
+
+# File version backups (created by file-diff-writer)
+*_versions/
+.*_versions/
+**/*_versions/
+**/.*_versions/
+
+# Environment file versions
+.env.example.v2
+..env_versions/
+
+# Docker
+docker-compose.override.yml
+.dockerignore.local
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+debug_startup.py
+
+# Debug and diagnostic scripts
+check_*.ps1
+check_*.py
+debug_*.py
+diagnose_*.ps1
+fix_*.ps1
+verify_*.ps1
+upload_*.ps1
+download_*.ps1
+sync_*.ps1
+final_*.ps1
+find_*.ps1
+run_debug.py
+install_and_test.sh
+
+# Deployment scripts (keep main ones, ignore debug variants)
+deploy-debug.sh
+deploy_*.sh
+!scripts/deploy*.ps1
+
+# PowerShell command artifacts
+ervices*
+
+# Test files (temporary)
+test_*.py
+!tests/test_*.py
+
+
+# OS files
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Test outputs
+test_results/
+pytest_results/
+htmlcov/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+wheels/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Secrets
+*.pem
+*.key
+*.crt
+*.cert
+secrets/
+credentials/
+
+# Uploaded files (if stored locally)
+uploads/
+downloads/
+
+# Monitoring
+grafana-storage/
+prometheus-data/
+
+# Vibe directory
+vibe/
+
+# MCP directory
+mcp/
