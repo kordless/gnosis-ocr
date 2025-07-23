@@ -236,21 +236,9 @@ class SessionManager {
             extractionStage.pages_processed === 0 && 
             extractionStage.progress_percent === 0) {
             
-            // Always consider this stale - if it's truly processing, it should have some progress
-            // Or check if the status was updated more than 30 seconds ago (much shorter window)
-            if (statusData.updated_at) {
-                const updatedTime = new Date(statusData.updated_at);
-                const now = new Date();
-                const timeDiff = now - updatedTime;
-                const thirtySecondsInMs = 30 * 1000;
-                
-                if (timeDiff > thirtySecondsInMs) {
-                    return true; // Status is stale
-                }
-            } else {
-                // No timestamp means we should rebuild to get current state
-                return true;
-            }
+            // ALWAYS consider this stale on page load - no time check needed
+            // If it's truly processing, it should have some progress by now
+            return true;
         }
         
         // Check for OCR stage that shows processing but no progress
@@ -260,19 +248,8 @@ class SessionManager {
             ocrStage.pages_processed === 0 && 
             ocrStage.progress_percent === 0) {
             
-            // Always consider this stale for OCR too
-            if (statusData.updated_at) {
-                const updatedTime = new Date(statusData.updated_at);
-                const now = new Date();
-                const timeDiff = now - updatedTime;
-                const thirtySecondsInMs = 30 * 1000;
-                
-                if (timeDiff > thirtySecondsInMs) {
-                    return true; // Status is stale
-                }
-            } else {
-                return true;
-            }
+            // ALWAYS consider this stale too
+            return true;
         }
         
         // Check if status is very old (more than 1 hour) - always rebuild old status
