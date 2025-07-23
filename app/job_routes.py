@@ -105,3 +105,31 @@ async def get_session_status(
     except Exception as e:
         logger.error(f"Error getting session status: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{session_id}/rebuild-status")
+async def rebuild_session_status(
+    session_id: str,
+    storage_service: StorageService = Depends(get_storage_service)
+):
+    """Rebuild session status by scanning actual files in storage"""
+    try:
+        from app.jobs import JobManager
+        job_manager = JobManager(storage_service)
+        
+        # Scan directories and rebuild status
+        status = await job_manager.scan_and_build_status(session_id)
+        
+        # Save the rebuilt status
+        await job_manager.update_session_status(session_id)
+        
+        logger.info(f"Rebuilt session status for {session_id}")
+        return {
+            "session_id": session_id,
+            "status": "rebuilt",
+            "message": "Session status has been rebuilt from actual files",
+            "data": status
+        }
+    except Exception as e:
+        logger.error(f"Error rebuilding session status for {session_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to rebuild session status: {str(e)}")
