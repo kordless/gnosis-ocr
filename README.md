@@ -48,9 +48,10 @@ git clone https://github.com/kordless/gnosis-ocr.git
 cd gnosis-ocr
 
 # Create environment files
-cp .env.cloudrun.example .env.cloudrun
-# Edit PROJECT_ID if deploying to cloud
-cp .env.example .env
+# Copy the sample file for local development
+cp .env.sample .env
+# Use the same file for Cloud Run and edit PROJECT_ID if deploying
+cp .env.sample .env.cloudrun
 
 # Build and run with GPU support
 docker-compose up --build
