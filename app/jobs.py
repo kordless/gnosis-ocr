@@ -212,9 +212,9 @@ class JobManager:
         # Count extracted page files
         pages_extracted = 0
         try:
-            files = await self.storage_service.list_files(session_id)
+            files = await self.storage_service.list_files(session_hash=session_id)
             # Count PNG files in pages/ directory
-            page_files = [f for f in files if f.startswith("pages/page_") and f.endswith(".png")]
+            page_files = [f for f in files if f.get('name', '').startswith("pages/page_") and f.get('name', '').endswith(".png")]
             pages_extracted = len(page_files)
         except Exception as e:
             logger.debug(f"Error listing page files for {session_id}: {e}")
@@ -222,9 +222,9 @@ class JobManager:
         # Count OCR result files
         ocr_completed = 0
         try:
-            files = await self.storage_service.list_files(session_id)
+            files = await self.storage_service.list_files(session_hash=session_id)
             # Count TXT files in results/ directory
-            result_files = [f for f in files if f.startswith("results/page_") and f.endswith(".txt")]
+            result_files = [f for f in files if f.get('name', '').startswith("results/page_") and f.get('name', '').endswith(".txt")]
             ocr_completed = len(result_files)
         except Exception as e:
             logger.debug(f"Error listing result files for {session_id}: {e}")
