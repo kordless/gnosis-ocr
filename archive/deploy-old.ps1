@@ -95,7 +95,7 @@ if ($Target -in @("cloudrun")) {
         }
         $projectId = $envConfig["PROJECT_ID"]
     } else {
-        Write-Warning ".env.cloudrun not found. Copy .env.cloudrun.example and update PROJECT_ID"
+        Write-Warning ".env.cloudrun not found. Copy .env.sample to .env.cloudrun and update PROJECT_ID"
         $projectId = $null
     }
 }

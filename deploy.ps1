@@ -40,7 +40,7 @@ if ($Target -eq "cloudrun") {
             $envConfig[$key.Trim()] = $value.Trim()
         }
     } else {
-        Write-Error ".env.cloudrun not found. Please create it from .env.example."
+        Write-Error ".env.cloudrun not found. Please create it from .env.sample."
     }
 }
 
