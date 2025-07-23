@@ -266,16 +266,20 @@ class SessionManager {
             extractionStage.pages_processed === 0 && 
             extractionStage.progress_percent === 0) {
             
-            // Check if the status was updated more than 2 minutes ago
+            // Always consider this stale - if it's truly processing, it should have some progress
+            // Or check if the status was updated more than 30 seconds ago (much shorter window)
             if (statusData.updated_at) {
                 const updatedTime = new Date(statusData.updated_at);
                 const now = new Date();
                 const timeDiff = now - updatedTime;
-                const twoMinutesInMs = 2 * 60 * 1000;
+                const thirtySecondsInMs = 30 * 1000;
                 
-                if (timeDiff > twoMinutesInMs) {
+                if (timeDiff > thirtySecondsInMs) {
                     return true; // Status is stale
                 }
+            } else {
+                // No timestamp means we should rebuild to get current state
+                return true;
             }
         }
         
@@ -286,16 +290,18 @@ class SessionManager {
             ocrStage.pages_processed === 0 && 
             ocrStage.progress_percent === 0) {
             
-            // Check if the status was updated more than 2 minutes ago
+            // Always consider this stale for OCR too
             if (statusData.updated_at) {
                 const updatedTime = new Date(statusData.updated_at);
                 const now = new Date();
                 const timeDiff = now - updatedTime;
-                const twoMinutesInMs = 2 * 60 * 1000;
+                const thirtySecondsInMs = 30 * 1000;
                 
-                if (timeDiff > twoMinutesInMs) {
+                if (timeDiff > thirtySecondsInMs) {
                     return true; // Status is stale
                 }
+            } else {
+                return true;
             }
         }
         
