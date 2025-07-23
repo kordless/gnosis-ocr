@@ -213,21 +213,48 @@ class JobManager:
         pages_extracted = 0
         try:
             files = await self.storage_service.list_files(session_hash=session_id)
-            # Count PNG files in pages/ directory
-            page_files = [f for f in files if f.get('name', '').startswith("pages/page_") and f.get('name', '').endswith(".png")]
+            logger.debug(f"Found {len(files)} files for session {session_id}")
+            
+            # Log the first few files to debug the structure
+            for i, f in enumerate(files[:5]):
+                logger.debug(f"File {i}: {f}")
+            
+            # Count PNG files that look like page files - be more flexible with the pattern
+            page_files = []
+            for f in files:
+                filename = f.get('name', '') if isinstance(f, dict) else str(f)
+                # Look for page files with various patterns
+                if (filename.endswith('.png') and 
+                    ('page_' in filename or 'page-' in filename) and
+                    ('pages/' in filename or filename.startswith('page_'))):
+                    page_files.append(filename)
+            
             pages_extracted = len(page_files)
+            logger.info(f"Found {pages_extracted} page files for session {session_id}: {page_files[:3]}...")
+            
         except Exception as e:
-            logger.debug(f"Error listing page files for {session_id}: {e}")
+            logger.error(f"Error listing page files for {session_id}: {e}")
         
         # Count OCR result files
         ocr_completed = 0
         try:
             files = await self.storage_service.list_files(session_hash=session_id)
-            # Count TXT files in results/ directory
-            result_files = [f for f in files if f.get('name', '').startswith("results/page_") and f.get('name', '').endswith(".txt")]
+            
+            # Count TXT files that look like result files - be more flexible
+            result_files = []
+            for f in files:
+                filename = f.get('name', '') if isinstance(f, dict) else str(f)
+                # Look for result files with various patterns
+                if (filename.endswith('.txt') and 
+                    ('page_' in filename or 'page-' in filename) and
+                    ('results/' in filename or filename.startswith('page_'))):
+                    result_files.append(filename)
+            
             ocr_completed = len(result_files)
+            logger.info(f"Found {ocr_completed} result files for session {session_id}")
+            
         except Exception as e:
-            logger.debug(f"Error listing result files for {session_id}: {e}")
+            logger.error(f"Error listing result files for {session_id}: {e}")
         
         # Build page extraction stage
         if pages_extracted > 0 or total_pages:
