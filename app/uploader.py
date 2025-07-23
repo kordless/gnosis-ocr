@@ -139,6 +139,32 @@ class UploadManager:
         except FileNotFoundError:
             return None
 
+    async def get_status_with_derived_fields(self) -> Optional[Dict]:
+        """Return upload status and compute missing chunk info."""
+        chunker_data = await self.get_status()
+        if not chunker_data:
+            return None
+
+        total_chunks = chunker_data.get("total_chunks", 0)
+
+        chunk_files = await self.storage_service.list_files(prefix="chunks", session_hash=self.session_id)
+
+        received_chunks = set()
+        for f in chunk_files:
+            if f["name"].startswith("chunk_") and f["name"].endswith(".bin"):
+                try:
+                    num = int(f["name"].split("_")[1].split(".")[0])
+                    received_chunks.add(num)
+                except (ValueError, IndexError):
+                    logger.warning(f"Could not parse chunk number from filename: {f['name']}")
+
+        missing_chunks = sorted(set(range(total_chunks)) - received_chunks)
+
+        chunker_data["received_chunks_count"] = len(received_chunks)
+        chunker_data["missing_chunks"] = missing_chunks
+
+        return chunker_data
+
 # These helper functions can remain as they are.
 def get_user_email_from_request(request, x_user_email: Optional[str] = None) -> str:
     if x_user_email:
