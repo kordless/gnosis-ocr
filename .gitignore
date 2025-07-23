@@ -170,3 +170,4 @@ vibe/
 
 # MCP directory
 mcp/
+.aider*

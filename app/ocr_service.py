@@ -112,12 +112,13 @@ class OCRService:
         results = self._process_batch_sync([image])
         return results[0] if results else None
 
-    def run_ocr_on_batch(self, image_batch: List[Image.Image], progress_callback=None) -> List[Dict[str, Any]]:
+    def run_ocr_on_batch(self, image_batch: List[Image.Image], progress_callback=None, page_result_callback=None) -> List[Dict[str, Any]]:
         """Runs OCR on a batch of images. This is the primary method for cloud processing.
         
         Args:
             image_batch: List of PIL Image objects to process
             progress_callback: Optional callback function(status, message, percent) for progress updates
+            page_result_callback: Optional callback function(page_index, result_text) for each processed page
             
         Returns:
             List of dicts with 'text' key and optionally 'progress_info' for status updates
@@ -154,9 +155,9 @@ class OCRService:
             if progress_callback:
                 progress_callback("processing", "Model loaded, starting OCR processing...", 100)
             
-        return self._process_batch_sync(image_batch, progress_callback)
+        return self._process_batch_sync(image_batch, progress_callback, page_result_callback)
 
-    def _process_batch_sync(self, image_batch: List[Image.Image], progress_callback=None) -> List[Dict[str, Any]]:
+    def _process_batch_sync(self, image_batch: List[Image.Image], progress_callback=None, page_result_callback=None) -> List[Dict[str, Any]]:
         """Synchronous core OCR processing logic for a batch of images."""
         try:
             batch_size = len(image_batch)
@@ -204,7 +205,12 @@ class OCRService:
                 # Get the text
                 text = output_text[0] if output_text else ""
                 
-                results.append({"text": text.strip()})
+                result_text = text.strip()
+                results.append({"text": result_text})
+
+                # If a result callback is provided, call it with the page index and the text
+                if page_result_callback:
+                    page_result_callback(idx, result_text)
             
             return results
             

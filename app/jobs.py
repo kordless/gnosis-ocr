@@ -208,54 +208,41 @@ class JobManager:
             "stages": {},
             "updated_at": datetime.utcnow().isoformat()
         }
-        
-        # Count extracted page files
+
+        # Count extracted page files by looking in the 'pages' directory
         pages_extracted = 0
         try:
-            files = await self.storage_service.list_files(session_hash=session_id)
-            logger.debug(f"Found {len(files)} files for session {session_id}")
-            
-            # Log the first few files to debug the structure
-            for i, f in enumerate(files[:5]):
-                logger.debug(f"File {i}: {f}")
-            
-            # Count PNG files that look like page files - be more flexible with the pattern
-            page_files = []
-            for f in files:
-                filename = f.get('name', '') if isinstance(f, dict) else str(f)
-                # Look for page files with various patterns
-                if (filename.endswith('.png') and 
-                    ('page_' in filename or 'page-' in filename) and
-                    ('pages/' in filename or filename.startswith('page_'))):
-                    page_files.append(filename)
-            
-            pages_extracted = len(page_files)
-            logger.info(f"Found {pages_extracted} page files for session {session_id}: {page_files[:3]}...")
-            
+            page_files_list = await self.storage_service.list_files(prefix="pages", session_hash=session_id)
+            pages_extracted = len([f for f in page_files_list if f.get('name', '').endswith('.png')])
+            logger.info(f"Found {pages_extracted} page files for session {session_id}")
         except Exception as e:
             logger.error(f"Error listing page files for {session_id}: {e}")
-        
-        # Count OCR result files
+
+        # Count OCR result files and read their content
         ocr_completed = 0
+        ocr_results = {}
         try:
-            files = await self.storage_service.list_files(session_hash=session_id)
-            
-            # Count TXT files that look like result files - be more flexible
-            result_files = []
-            for f in files:
-                filename = f.get('name', '') if isinstance(f, dict) else str(f)
-                # Look for result files with various patterns
-                if (filename.endswith('.txt') and 
-                    ('page_' in filename or 'page-' in filename) and
-                    ('results/' in filename or filename.startswith('page_'))):
-                    result_files.append(filename)
-            
-            ocr_completed = len(result_files)
+            result_files_list = await self.storage_service.list_files(prefix="results", session_hash=session_id)
+            ocr_result_files = [f for f in result_files_list if f.get('name', '').endswith('.txt')]
+            ocr_completed = len(ocr_result_files)
             logger.info(f"Found {ocr_completed} result files for session {session_id}")
-            
+
+            if ocr_completed > 0:
+                for file_info in ocr_result_files:
+                    file_name = file_info.get('name')
+                    try:
+                        page_num_str = file_name.split('_')[-1].split('.')[0]
+                        page_num = int(page_num_str)
+                        
+                        file_content_bytes = await self.storage_service.get_file(file_name, session_id)
+                        ocr_results[page_num] = file_content_bytes.decode('utf-8')
+                    except (ValueError, IndexError):
+                        logger.warning(f"Could not parse page number from filename: {file_name}")
+                    except Exception as e:
+                        logger.error(f"Error reading result file {file_name}: {e}")
         except Exception as e:
             logger.error(f"Error listing result files for {session_id}: {e}")
-        
+
         # Build page extraction stage
         if pages_extracted > 0 or total_pages:
             actual_total = total_pages or pages_extracted
@@ -277,7 +264,8 @@ class JobManager:
                 "status": "complete" if ocr_complete else "processing",
                 "total_pages": ocr_total,
                 "pages_processed": ocr_completed,
-                "progress_percent": round((ocr_completed / ocr_total * 100)) if ocr_total > 0 else 0
+                "progress_percent": round((ocr_completed / ocr_total * 100)) if ocr_total > 0 else 0,
+                "results": ocr_results
             }
         
         return status_data
@@ -464,7 +452,8 @@ class JobProcessor:
         loaded_images = await asyncio.gather(*load_tasks)
         
         valid_images = {pn: img for pn, img in loaded_images if img is not None}
-        
+        page_keys = list(valid_images.keys())
+
         # 3. Process the batch of images.
         loop = asyncio.get_running_loop()
         
@@ -477,33 +466,37 @@ class JobProcessor:
         
         def log_progress(status: str, message: str, percent: int):
             logger.info(f"OCR Progress - Job {job_payload['job_id']}: {status} - {message} ({percent}%)")
-            # Only update status on significant progress
+            # Use run_coroutine_threadsafe to schedule the callback on the main loop
             if status == "completed" or (status == "processing" and percent >= 100):
-                asyncio.create_task(update_status_callback(status, message, percent))
+                asyncio.run_coroutine_threadsafe(
+                    update_status_callback(status, message, percent),
+                    loop
+                )
+
+        # This is the new callback that saves each result as it comes in
+        def page_result_callback(page_index: int, text_content: str):
+            page_num = page_keys[page_index]
+            result_filename = f"results/page_{page_num:03d}.txt"
+            
+            # Schedule the save and status update on the main event loop
+            async def save_and_update():
+                await self.storage_service.save_file(text_content, result_filename, session_id)
+                await self.job_manager.update_session_status(session_id, total_pages=total_pages)
+            
+            asyncio.run_coroutine_threadsafe(save_and_update(), loop)
         
         # The run_ocr_on_batch method is efficient for both cloud (GPU) and local (CPU)
-        ocr_results_list = await loop.run_in_executor(
-            None, ocr_service.run_ocr_on_batch, list(valid_images.values()), log_progress
+        # It now uses a callback to handle results as they come in.
+        await loop.run_in_executor(
+            None, 
+            ocr_service.run_ocr_on_batch, 
+            list(valid_images.values()), 
+            log_progress,
+            page_result_callback
         )
         
-        # Map results back to their page numbers
-        all_results = {}
-        page_keys = list(valid_images.keys())
-        for i, ocr_result in enumerate(ocr_results_list):
-            page_num = page_keys[i]
-            all_results[page_num] = ocr_result["text"]
-
-        # 4. Concurrently save all text results for this batch.
-        async def save_result(page_num, text_content):
-            result_filename = f"results/page_{page_num:03d}.txt"
-            await self.storage_service.save_file(text_content, result_filename, session_id)
-
-        save_tasks = [save_result(pn, txt) for pn, txt in all_results.items()]
-        await asyncio.gather(*save_tasks)
-        logger.info(f"Saved {len(all_results)} OCR result files for pages {start_page}-{end_page}.")
-        
-        # Update status after saving all results
-        await self.job_manager.update_session_status(session_id, total_pages=total_pages)
+        # Since results are now saved via the callback, we no longer need to process a list of results here.
+        logger.info(f"Finished processing batch for pages {start_page}-{end_page}.")
 
         # 6. --- The Chaining Logic ---
         if end_page < total_pages:
@@ -521,4 +514,5 @@ class JobProcessor:
         else:
             # This was the final batch.
             logger.info(f"All {total_pages} pages have been processed for OCR.")
-            # Optionally, you could trigger a final "combine results" job here.
+            # Final status update to ensure everything is marked as complete
+            await self.job_manager.update_session_status(session_id, total_pages=total_pages)

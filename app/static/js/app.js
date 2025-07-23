@@ -134,85 +134,13 @@ class SessionManager {
     }
 
     async refreshAllSessionStatus() {
-        // Check status of all sessions by looking for session_status.json
+        // On page load, always trigger a rebuild for all sessions to ensure UI is in sync.
         for (const session of this.sessions) {
-            // Check ALL PDF sessions, not just processing/uploaded ones
             if (session.fileType === 'pdf' && session.userHash && session.sessionId) {
-                try {
-                    // Try to fetch session_status.json
-                    const statusUrl = `/storage/${session.userHash}/${session.sessionId}/session_status.json`;
-                    const response = await fetch(statusUrl);
-                    
-                    if (response.ok) {
-                        let statusData;
-                        try {
-                            statusData = await response.json();
-                        } catch (jsonError) {
-                            // JSON is corrupted, rebuild it
-                            console.warn(`Corrupted session_status.json for ${session.sessionId}, rebuilding...`);
-                            statusData = await this.rebuildSessionStatus(session.sessionId);
-                            if (!statusData) continue; // Skip if rebuild failed
-                        }
-                        
-                        // Check if status appears stale and needs rebuilding
-                        if (this.isStatusStale(statusData)) {
-                            console.info(`Stale session_status.json detected for ${session.sessionId}, rebuilding...`);
-                            const rebuiltStatus = await this.rebuildSessionStatus(session.sessionId);
-                            if (rebuiltStatus) {
-                                statusData = rebuiltStatus;
-                            }
-                        }
-                        
-                        // Process the status data using the helper method
-                        await this.processStatusData(session, statusData);
-                        
-                        // Handle backward compatibility for old single-stage format
-                        if (!statusData.stages) {
-                            // Old single-stage format - keep backward compatibility
-                            const lastProgress = this.progressTracker.get(session.sessionId) || 0;
-                            const lastPages = this.pageTracker.get(session.sessionId) || 0;
-                            
-                            const currentProgress = statusData.progress_percent || 0;
-                            const currentPages = statusData.pages_extracted || 0;
-                            
-                            const safeProgress = Math.max(currentProgress, lastProgress);
-                            const safePages = Math.max(currentPages, lastPages);
-                            
-                            this.progressTracker.set(session.sessionId, safeProgress);
-                            this.pageTracker.set(session.sessionId, safePages);
-                            
-                            if (statusData.status === 'complete' && statusData.pages_extracted > 0) {
-                                this.updateSession(session.sessionId, {
-                                    status: 'ready_for_ocr',
-                                    pageCount: statusData.pages_extracted,
-                                    extractionProgress: 100
-                                });
-                            } else if (statusData.status === 'processing') {
-                                this.updateSession(session.sessionId, {
-                                    status: 'processing',
-                                    extractionProgress: safeProgress,
-                                    pageCount: statusData.pages_extracted || 0,
-                                    totalPages: statusData.total_pages || 0
-                                });
-                            }
-                        }
-                    } else if (response.status === 404) {
-                        // No status file yet, try to rebuild it from actual files
-                        console.info(`No session_status.json found for ${session.sessionId}, attempting to rebuild...`);
-                        const rebuiltStatus = await this.rebuildSessionStatus(session.sessionId);
-                        if (rebuiltStatus) {
-                            // Process the rebuilt status data
-                            await this.processStatusData(session, rebuiltStatus);
-                        } else if (session.status === 'uploaded') {
-                            // Fallback: PDF is ready for extraction
-                            this.updateSession(session.sessionId, {
-                                status: 'uploaded',
-                                extractionProgress: 0
-                            });
-                        }
-                    }
-                } catch (error) {
-                    console.error(`Error checking session status for ${session.sessionId}:`, error);
+                console.info(`Triggering status rebuild for session ${session.sessionId} on page load.`);
+                const rebuiltStatus = await this.rebuildSessionStatus(session.sessionId);
+                if (rebuiltStatus) {
+                    await this.processStatusData(session, rebuiltStatus);
                 }
             }
         }
