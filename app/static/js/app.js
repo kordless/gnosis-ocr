@@ -245,7 +245,7 @@ class SessionManager {
     }
 
     async rebuildSessionStatus(sessionId) {
-        """Rebuild session status by calling the API endpoint"""
+        // Rebuild session status by calling the API endpoint
         try {
             const response = await fetch(`/api/jobs/${sessionId}/rebuild-status`, {
                 method: 'POST',
@@ -269,7 +269,7 @@ class SessionManager {
     }
 
     async processStatusData(session, statusData) {
-        """Process status data and update session accordingly"""
+        // Process status data and update session accordingly
         // Handle multi-stage format
         if (statusData.stages) {
             const extractionStage = statusData.stages.page_extraction;
