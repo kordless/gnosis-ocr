@@ -26,3 +26,4 @@ structlog>=24.1.0
 # Cloud dependencies (required for cloud deployment)
 google-cloud-tasks>=2.13.0
 google-cloud-storage>=2.10.0
+pytest>=7.4
