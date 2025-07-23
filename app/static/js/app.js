@@ -136,7 +136,8 @@ class SessionManager {
     async refreshAllSessionStatus() {
         // Check status of all sessions by looking for session_status.json
         for (const session of this.sessions) {
-            if (session.status === 'processing' || (session.status === 'uploaded' && session.fileType === 'pdf')) {
+            // Check ALL PDF sessions, not just processing/uploaded ones
+            if (session.fileType === 'pdf' && session.userHash && session.sessionId) {
                 try {
                     // Try to fetch session_status.json
                     const statusUrl = `/storage/${session.userHash}/${session.sessionId}/session_status.json`;
@@ -195,14 +196,14 @@ class SessionManager {
                                 });
                             }
                         }
-                    } else if (response.status === 404 && session.status === 'uploaded' && session.fileType === 'pdf') {
+                    } else if (response.status === 404) {
                         // No status file yet, try to rebuild it from actual files
                         console.info(`No session_status.json found for ${session.sessionId}, attempting to rebuild...`);
                         const rebuiltStatus = await this.rebuildSessionStatus(session.sessionId);
                         if (rebuiltStatus) {
                             // Process the rebuilt status data
                             await this.processStatusData(session, rebuiltStatus);
-                        } else {
+                        } else if (session.status === 'uploaded') {
                             // Fallback: PDF is ready for extraction
                             this.updateSession(session.sessionId, {
                                 status: 'uploaded',
@@ -214,49 +215,18 @@ class SessionManager {
                     console.error(`Error checking session status for ${session.sessionId}:`, error);
                 }
             }
-            
-            // For any session, also check if session_status.json exists to update status
-            // This handles page refresh scenarios where status might have changed
-            if (session.fileType === 'pdf' && session.userHash && session.sessionId) {
-                try {
-                    const statusUrl = `/storage/${session.userHash}/${session.sessionId}/session_status.json`;
-                    const response = await fetch(statusUrl);
-                    
-                    if (response.ok) {
-                        const statusData = await response.json();
-                        
-                        // Handle multi-stage format
-                        if (statusData.stages && statusData.stages.page_extraction) {
-                            const extractionStage = statusData.stages.page_extraction;
-                            
-                            if (extractionStage.status === 'complete' && extractionStage.total_pages > 0 && session.status !== 'ready_for_ocr' && session.status !== 'ocr_processing' && session.status !== 'ocr_complete') {
-                                // Update session that was marked differently but is actually complete
-                                this.updateSession(session.sessionId, {
-                                    status: 'ready_for_ocr',
-                                    pageCount: extractionStage.total_pages,
-                                    extractionProgress: 100
-                                });
-                            }
-                        } else if (statusData.status === 'complete' && statusData.pages_extracted > 0 && session.status !== 'ready_for_ocr') {
-                            // Old format - backward compatibility
-                            this.updateSession(session.sessionId, {
-                                status: 'ready_for_ocr',
-                                pageCount: statusData.pages_extracted,
-                                extractionProgress: 100
-                            });
-                        }
-                    }
-                } catch (error) {
-                    // Ignore errors for this secondary check
-                }
-            }
         }
     }
 
     isStatusStale(statusData) {
         // Check if the status appears stale and needs rebuilding
-        if (!statusData || !statusData.stages) {
-            return false; // Can't determine staleness without stages
+        if (!statusData) {
+            return true; // No status data means we should rebuild
+        }
+        
+        // If no stages, always rebuild to get current format
+        if (!statusData.stages) {
+            return true;
         }
         
         // Check for extraction stage that shows processing but no progress
@@ -302,6 +272,18 @@ class SessionManager {
                 }
             } else {
                 return true;
+            }
+        }
+        
+        // Check if status is very old (more than 1 hour) - always rebuild old status
+        if (statusData.updated_at) {
+            const updatedTime = new Date(statusData.updated_at);
+            const now = new Date();
+            const timeDiff = now - updatedTime;
+            const oneHourInMs = 60 * 60 * 1000;
+            
+            if (timeDiff > oneHourInMs) {
+                return true; // Very old status, rebuild to be sure
             }
         }
         
