@@ -143,72 +143,21 @@ class SessionManager {
                     const response = await fetch(statusUrl);
                     
                     if (response.ok) {
-                        const statusData = await response.json();
+                        let statusData;
+                        try {
+                            statusData = await response.json();
+                        } catch (jsonError) {
+                            // JSON is corrupted, rebuild it
+                            console.warn(`Corrupted session_status.json for ${session.sessionId}, rebuilding...`);
+                            statusData = await this.rebuildSessionStatus(session.sessionId);
+                            if (!statusData) continue; // Skip if rebuild failed
+                        }
                         
-                        // Handle multi-stage format
-                        if (statusData.stages) {
-                            // Multi-stage format
-                            const extractionStage = statusData.stages.page_extraction;
-                            const ocrStage = statusData.stages.ocr;
-                            
-                            if (extractionStage) {
-                                // Get last known progress for extraction
-                                const lastProgress = this.progressTracker.get(session.sessionId + '_extraction') || 0;
-                                const lastPages = this.pageTracker.get(session.sessionId + '_extraction') || 0;
-                                
-                                const safeProgress = Math.max(extractionStage.progress_percent || 0, lastProgress);
-                                const safePages = Math.max(extractionStage.pages_processed || 0, lastPages);
-                                
-                                this.progressTracker.set(session.sessionId + '_extraction', safeProgress);
-                                this.pageTracker.set(session.sessionId + '_extraction', safePages);
-                                
-                                if (extractionStage.status === 'complete') {
-                                    // Extraction complete
-                                    this.updateSession(session.sessionId, {
-                                        status: 'ready_for_ocr',
-                                        pageCount: extractionStage.total_pages,
-                                        extractionProgress: 100
-                                    });
-                                } else if (extractionStage.status === 'processing') {
-                                    // Still extracting
-                                    this.updateSession(session.sessionId, {
-                                        status: 'processing',
-                                        extractionProgress: safeProgress,
-                                        pageCount: safePages,
-                                        totalPages: extractionStage.total_pages
-                                    });
-                                }
-                            }
-                            
-                            if (ocrStage) {
-                                // Get last known progress for OCR
-                                const lastOcrProgress = this.progressTracker.get(session.sessionId + '_ocr') || 0;
-                                const lastOcrPages = this.pageTracker.get(session.sessionId + '_ocr') || 0;
-                                
-                                const safeOcrProgress = Math.max(ocrStage.progress_percent || 0, lastOcrProgress);
-                                const safeOcrPages = Math.max(ocrStage.pages_processed || 0, lastOcrPages);
-                                
-                                this.progressTracker.set(session.sessionId + '_ocr', safeOcrProgress);
-                                this.pageTracker.set(session.sessionId + '_ocr', safeOcrPages);
-                                
-                                if (ocrStage.status === 'complete') {
-                                    // OCR complete
-                                    this.updateSession(session.sessionId, {
-                                        status: 'ocr_complete',
-                                        ocrProgress: 100,
-                                        ocrPagesProcessed: ocrStage.pages_processed
-                                    });
-                                } else if (ocrStage.status === 'processing') {
-                                    // OCR in progress
-                                    this.updateSession(session.sessionId, {
-                                        status: 'ocr_processing',
-                                        ocrProgress: safeOcrProgress,
-                                        ocrPagesProcessed: safeOcrPages,
-                                        ocrTotalPages: ocrStage.total_pages
-                                    });
-                                }
-                            }
-                        } else {
+                        // Process the status data using the helper method
+                        await this.processStatusData(session, statusData);
+                        
+                        // Handle backward compatibility for old single-stage format
+                        if (!statusData.stages) {
                             // Old single-stage format - keep backward compatibility
                             const lastProgress = this.progressTracker.get(session.sessionId) || 0;
                             const lastPages = this.pageTracker.get(session.sessionId) || 0;
@@ -238,11 +187,19 @@ class SessionManager {
                             }
                         }
                     } else if (response.status === 404 && session.status === 'uploaded' && session.fileType === 'pdf') {
-                        // No status file yet, PDF is ready for extraction
-                        this.updateSession(session.sessionId, {
-                            status: 'uploaded',
-                            extractionProgress: 0
-                        });
+                        // No status file yet, try to rebuild it from actual files
+                        console.info(`No session_status.json found for ${session.sessionId}, attempting to rebuild...`);
+                        const rebuiltStatus = await this.rebuildSessionStatus(session.sessionId);
+                        if (rebuiltStatus) {
+                            // Process the rebuilt status data
+                            await this.processStatusData(session, rebuiltStatus);
+                        } else {
+                            // Fallback: PDF is ready for extraction
+                            this.updateSession(session.sessionId, {
+                                status: 'uploaded',
+                                extractionProgress: 0
+                            });
+                        }
                     }
                 } catch (error) {
                     console.error(`Error checking session status for ${session.sessionId}:`, error);
@@ -282,6 +239,97 @@ class SessionManager {
                     }
                 } catch (error) {
                     // Ignore errors for this secondary check
+                }
+            }
+        }
+    }
+
+    async rebuildSessionStatus(sessionId) {
+        """Rebuild session status by calling the API endpoint"""
+        try {
+            const response = await fetch(`/api/jobs/${sessionId}/rebuild-status`, {
+                method: 'POST',
+                headers: {
+                    'X-User-Email': getUserEmail()
+                }
+            });
+            
+            if (response.ok) {
+                const result = await response.json();
+                console.info(`Successfully rebuilt status for session ${sessionId}`);
+                return result.data;
+            } else {
+                console.error(`Failed to rebuild status for session ${sessionId}: ${response.status}`);
+                return null;
+            }
+        } catch (error) {
+            console.error(`Error rebuilding status for session ${sessionId}:`, error);
+            return null;
+        }
+    }
+
+    async processStatusData(session, statusData) {
+        """Process status data and update session accordingly"""
+        // Handle multi-stage format
+        if (statusData.stages) {
+            const extractionStage = statusData.stages.page_extraction;
+            const ocrStage = statusData.stages.ocr;
+            
+            if (extractionStage) {
+                // Get last known progress for extraction
+                const lastProgress = this.progressTracker.get(session.sessionId + '_extraction') || 0;
+                const lastPages = this.pageTracker.get(session.sessionId + '_extraction') || 0;
+                
+                const safeProgress = Math.max(extractionStage.progress_percent || 0, lastProgress);
+                const safePages = Math.max(extractionStage.pages_processed || 0, lastPages);
+                
+                this.progressTracker.set(session.sessionId + '_extraction', safeProgress);
+                this.pageTracker.set(session.sessionId + '_extraction', safePages);
+                
+                if (extractionStage.status === 'complete') {
+                    // Extraction complete
+                    this.updateSession(session.sessionId, {
+                        status: 'ready_for_ocr',
+                        pageCount: extractionStage.total_pages,
+                        extractionProgress: 100
+                    });
+                } else if (extractionStage.status === 'processing') {
+                    // Still extracting
+                    this.updateSession(session.sessionId, {
+                        status: 'processing',
+                        extractionProgress: safeProgress,
+                        pageCount: safePages,
+                        totalPages: extractionStage.total_pages
+                    });
+                }
+            }
+            
+            if (ocrStage) {
+                // Get last known progress for OCR
+                const lastOcrProgress = this.progressTracker.get(session.sessionId + '_ocr') || 0;
+                const lastOcrPages = this.pageTracker.get(session.sessionId + '_ocr') || 0;
+                
+                const safeOcrProgress = Math.max(ocrStage.progress_percent || 0, lastOcrProgress);
+                const safeOcrPages = Math.max(ocrStage.pages_processed || 0, lastOcrPages);
+                
+                this.progressTracker.set(session.sessionId + '_ocr', safeOcrProgress);
+                this.pageTracker.set(session.sessionId + '_ocr', safeOcrPages);
+                
+                if (ocrStage.status === 'complete') {
+                    // OCR complete
+                    this.updateSession(session.sessionId, {
+                        status: 'ocr_complete',
+                        ocrProgress: 100,
+                        ocrPagesProcessed: ocrStage.pages_processed
+                    });
+                } else if (ocrStage.status === 'processing') {
+                    // OCR in progress
+                    this.updateSession(session.sessionId, {
+                        status: 'ocr_processing',
+                        ocrProgress: safeOcrProgress,
+                        ocrPagesProcessed: safeOcrPages,
+                        ocrTotalPages: ocrStage.total_pages
+                    });
                 }
             }
         }
