@@ -153,6 +153,15 @@ class SessionManager {
                             if (!statusData) continue; // Skip if rebuild failed
                         }
                         
+                        // Check if status appears stale and needs rebuilding
+                        if (this.isStatusStale(statusData)) {
+                            console.info(`Stale session_status.json detected for ${session.sessionId}, rebuilding...`);
+                            const rebuiltStatus = await this.rebuildSessionStatus(session.sessionId);
+                            if (rebuiltStatus) {
+                                statusData = rebuiltStatus;
+                            }
+                        }
+                        
                         // Process the status data using the helper method
                         await this.processStatusData(session, statusData);
                         
@@ -242,6 +251,55 @@ class SessionManager {
                 }
             }
         }
+    }
+
+    isStatusStale(statusData) {
+        // Check if the status appears stale and needs rebuilding
+        if (!statusData || !statusData.stages) {
+            return false; // Can't determine staleness without stages
+        }
+        
+        // Check for extraction stage that shows processing but no progress
+        const extractionStage = statusData.stages.page_extraction;
+        if (extractionStage && 
+            extractionStage.status === 'processing' && 
+            extractionStage.pages_processed === 0 && 
+            extractionStage.progress_percent === 0) {
+            
+            // Check if the status was updated more than 2 minutes ago
+            if (statusData.updated_at) {
+                const updatedTime = new Date(statusData.updated_at);
+                const now = new Date();
+                const timeDiff = now - updatedTime;
+                const twoMinutesInMs = 2 * 60 * 1000;
+                
+                if (timeDiff > twoMinutesInMs) {
+                    return true; // Status is stale
+                }
+            }
+        }
+        
+        // Check for OCR stage that shows processing but no progress
+        const ocrStage = statusData.stages.ocr;
+        if (ocrStage && 
+            ocrStage.status === 'processing' && 
+            ocrStage.pages_processed === 0 && 
+            ocrStage.progress_percent === 0) {
+            
+            // Check if the status was updated more than 2 minutes ago
+            if (statusData.updated_at) {
+                const updatedTime = new Date(statusData.updated_at);
+                const now = new Date();
+                const timeDiff = now - updatedTime;
+                const twoMinutesInMs = 2 * 60 * 1000;
+                
+                if (timeDiff > twoMinutesInMs) {
+                    return true; // Status is stale
+                }
+            }
+        }
+        
+        return false;
     }
 
     async rebuildSessionStatus(sessionId) {
